@@ -1,5 +1,5 @@
 //@version=5
-indicator("CROSV [Scientist-kasutu]", overlay=true, max_lines_count = 500, max_labels_count = 500, max_bars_back=4000)
+indicator("CROSV [Scientist-kasutu]", overlay=true, max_lines_count = 500, max_labels_count = 500, max_bars_back=5000, format = format.volume)
 
 // EMA Inputs
 ema1_length = input.int(20, title="EMA 1 (20) Length", minval=1)
@@ -37,124 +37,6 @@ plot(ema3, color=(ema3 > ema2) ? down_color3 : up_color3, linewidth=3, title="EM
 
 // Plot Outline for EMA 2 Using Zone Color
 plot(ema2, color=color.new(zone_color, 80), linewidth=zone_width, title="EMA 2 Outline")  // Outline using zone color
-
-
-// This work is licensed under a Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0) https://creativecommons.org/licenses/by-nc-sa/4.0/
-// © LuxAlgo
-// Nadarya-Wattson
-//------------------------------------------------------------------------------
-//Settings
-//-----------------------------------------------------------------------------{
-h = input.float(8.,'Bandwidth', minval = 0)
-mult = input.float(3., minval = 0)
-src = input(close, 'Source')
-
-repaint = input(true, 'Repainting Smoothing', tooltip = 'Repainting is an effect where the indicators historical output is subject to change over time. Disabling repainting will cause the indicator to output the endpoints of the calculations')
-
-//Style
-upCss = input.color(color.teal, 'Colors', inline = 'inline1', group = 'Style')
-dnCss = input.color(color.red, '', inline = 'inline1', group = 'Style')
-
-//-----------------------------------------------------------------------------}
-//Functions
-//-----------------------------------------------------------------------------{
-//Gaussian window
-gauss(x, h) => math.exp(-(math.pow(x, 2)/(h * h * 2)))
-
-//-----------------------------------------------------------------------------}
-//Append lines
-//-----------------------------------------------------------------------------{
-n = bar_index
-
-var ln = array.new_line(0) 
-
-if barstate.isfirst and repaint
-    for i = 0 to 499
-        array.push(ln,line.new(na,na,na,na))
-
-//-----------------------------------------------------------------------------}
-//End point method
-//-----------------------------------------------------------------------------{
-var coefs = array.new_float(0)
-var den = 0.
-
-if barstate.isfirst and not repaint
-    for i = 0 to 499
-        w = gauss(i, h)
-        coefs.push(w)
-
-    den := coefs.sum()
-
-out = 0.
-if not repaint
-    for i = 0 to 499
-        out += src[i] * coefs.get(i)
-out /= den
-mae = ta.sma(math.abs(src - out), 499) * mult
-
-upper = out + mae
-lower = out - mae
- 
-//-----------------------------------------------------------------------------}
-//Compute and display NWE
-//-----------------------------------------------------------------------------{
-float y2 = na
-float y1 = na
-
-nwe = array.new<float>(0)
-if barstate.islast and repaint
-    sae = 0.
-    //Compute and set NWE point 
-    for i = 0 to math.min(499,n - 1)
-        sum = 0.
-        sumw = 0.
-        //Compute weighted mean 
-        for j = 0 to math.min(499,n - 1)
-            w = gauss(i - j, h)
-            sum += src[j] * w
-            sumw += w
-
-        y2 := sum / sumw
-        sae += math.abs(src[i] - y2)
-        nwe.push(y2)
-    
-    sae := sae / math.min(499,n - 1) * mult
-    for i = 0 to math.min(499,n - 1)
-        if i%2
-            line.new(n-i+1, y1 + sae, n-i, nwe.get(i) + sae, color = upCss)
-            line.new(n-i+1, y1 - sae, n-i, nwe.get(i) - sae, color = dnCss)
-        
-        if src[i] > nwe.get(i) + sae and src[i+1] < nwe.get(i) + sae
-            label.new(n-i, src[i], '▼', color = color(na), style = label.style_label_down, textcolor = dnCss, textalign = text.align_center)
-        if src[i] < nwe.get(i) - sae and src[i+1] > nwe.get(i) - sae
-            label.new(n-i, src[i], '▲', color = color(na), style = label.style_label_up, textcolor = upCss, textalign = text.align_center)
-        
-        y1 := nwe.get(i)
-
-//-----------------------------------------------------------------------------}
-//Dashboard
-//-----------------------------------------------------------------------------{
-var tb = table.new(position.top_right, 1, 1
-  , bgcolor = #1e222d
-  , border_color = #373a46
-  , border_width = 1
-  , frame_color = #373a46
-  , frame_width = 1)
-
-if repaint
-    tb.cell(0, 0, 'Repainting Mode Enabled', text_color = color.white, text_size = size.small)
-
-//-----------------------------------------------------------------------------}
-//Plot
-//-----------------------------------------------------------------------------}
-plot(repaint ? na : out + mae, 'Upper', upCss)
-plot(repaint ? na : out - mae, 'Lower', dnCss)
-
-//Crossing Arrows
-plotshape(ta.crossunder(close, out - mae) ? low : na, "Crossunder", shape.labelup, location.absolute, color(na), 0 , text = '▲', textcolor = upCss, size = size.tiny)
-plotshape(ta.crossover(close, out + mae) ? high : na, "Crossover", shape.labeldown, location.absolute, color(na), 0 , text = '▼', textcolor = dnCss, size = size.tiny)
-
-//-----------------------------------------------------------------------------}
 
 // This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 // © LonesomeTheBlue
@@ -321,3 +203,241 @@ p1 = plot(should_plot ? close : na, title='Candle Close', color=color.new(C_PRIM
 p2 = plot(should_plot ? friday_close : na, title="CME Close", color=color.new(C_SECONDARY, 100), style=plot.style_linebr, linewidth=3)
 color cc = f_c_gradientAdvDecPro(close, friday_close, 15, color.new(C_PRIMARY, 70), C_PRIMARY, color.new(C_SECONDARY, 70), C_SECONDARY)
 fill(p1, p2, cc)
+
+// Order Blocks
+// Input options
+inputRange = input.int(25, "Candle Range", minval=5, maxval=100, step=1, group = "BASIC SETTINGS")
+bullishBreakerSource = input.source(close, title="Bullish Breaker Source")
+bearishBreakerSource = input.source(close, title="Bearish Breaker Source")
+
+// optional displays
+showPD = input.bool(false, "Show Previous Day High/Low", group = "Extras")
+showBearishBOS = input.bool(false, "Show Bearsish BOS Line", group = "Extras")
+showBullishBOS = input.bool(false, "Show Bullish BOS Line", group = "Extras")
+showBreakerCandles = input.bool(false, "Highlight Breaker Candles", group = "Extras")
+showRetestCandles = input.bool(false, "Highlight Re-test Candles", group = "Extras")
+showTrendColours = input.bool(false, "Show Trend Colours", group = "Extras")
+showAlerts = input.bool(false, "Trigger Alerts", group = "Extras")
+useMitigatedBlocks = input.bool(false, "Show Mitigated Blocks", group = "Extras")
+
+// colours & styles
+bearishOBColour = input.color(color.rgb(219,166,50, 80), title = "Bearish Order Block Colour", group = "STYLES")
+bullishOBColour = input.color(color.rgb(192,230,174, 60), title= "Bullish Order Block Colour", group = "STYLES")
+mitigatedOBColour = input.color(color.rgb(207,203,202, 80), title= "Mitigated Order Block Colour", group = "STYLES")
+BOSCandleColour = input.color(color.yellow, title= "Breaker Candle Colour", group = "STYLES")
+shortRetestCandleColour = input.color(color.purple, title= "Short Re-Test Candle Colour", group = "STYLES")
+longRetestCandleColour = input.color(color.orange, title= "Long Re-Test Candle Colour", group = "STYLES")
+bullishTrendColor = input.color(color.lime, title= "Bullish Trend Colour", group = "STYLES")
+bearishTrendColour = input.color(color.red, title= "Bearish Trend Colour", group = "STYLES")
+
+
+// candle colouring
+var int CandleColourMode = 0
+var bool BosCandle = false
+var bool bullishAlert = false
+var bool bearishAlert = false
+var bool shortRetestCandle = false
+var bool longRetestCandle = false
+
+// tracking for entries
+var int lastDownIndex=0
+var float lastDown=0
+var float lastLow=0
+
+var int lastUpIndex=0
+var float lastUp=0
+var float lastUpLow=0
+var float lastUpOpen=0
+var float lastHigh=0
+var float lastBullBreakLow=0
+
+// structure
+var int structureLowIndex=0
+float structureLow=1000000
+
+// order block drawing arrays
+var longBoxes = array.new_box()
+var longBoxStart = array.new_int()
+var longBoxState = array.new_int()
+var shortBoxes = array.new_box()
+var shortBoxStart = array.new_int()
+var shortBoxState = array.new_int()
+var bosLines = array.new_line()
+
+var int lastLongIndex=0
+var int lastShortIndex=0
+BosCandle:=false
+bullishAlert:=false
+bearishAlert:=false
+shortRetestCandle:=false
+longRetestCandle:=false
+
+PDH = request.security(syminfo.tickerid,"D",high[1])
+PDL = request.security(syminfo.tickerid,"D",low[1])
+
+if(showPD)
+    var line l_pdh = na, var line l_pdo = na, var line l_pdl = na, var label lbl_pdh = na, var label lbl_pdl = na
+    if barstate.islast
+        lbl_pdh := label.new(bar_index + 8, PDH, "PDH", style=label.style_label_left, textcolor = color.white)
+        lbl_pdl := label.new(bar_index + 8, PDL, "PDL", style=label.style_label_left, textcolor = color.white)
+        l_pdh := line.new(bar_index-1, PDH, bar_index + 8, PDH, extend=extend.left, color=color.blue)
+        l_pdl := line.new(bar_index-1, PDL, bar_index+8, PDL, extend=extend.left, color=color.blue)
+    line.delete(l_pdh[1])
+    line.delete(l_pdo[1])
+    line.delete(l_pdl[1])
+    label.delete(lbl_pdh[1])
+    label.delete(lbl_pdl[1])
+
+// functions
+structureLowIndexPointer(len) =>
+    float minValue = ta.highest(high, inputRange)[1]
+    int minIndex = bar_index 
+    for i = 1 to len
+        if low[i] < minValue
+            minValue := low[i]
+            minIndex := bar_index[i]
+    minIndex
+
+withinBullishBlock(position) =>
+    bool result = false
+    if((array.size(longBoxes)>0))
+        for i = (array.size(longBoxes)-1) to 0
+            box=array.get(longBoxes,i)
+            top=box.get_top(box)
+            bottom=box.get_bottom(box)
+            if(position<top and position>bottom)
+                result:=true
+    result
+
+
+// get the lowest point in the range
+structureLow:=ta.lowest(low, inputRange)[1]
+structureLowIndex:=structureLowIndexPointer(inputRange)
+
+
+// bearish break of structure
+if(ta.crossunder(bearishBreakerSource,structureLow))
+    if((bar_index - lastUpIndex) < 1000)
+        // add bear order block
+        array.push(shortBoxStart, bar_index)
+        array.push(shortBoxState, 0)
+        array.push(shortBoxes,box.new(left=lastUpIndex, top=lastHigh, bottom=lastUpLow,right=lastUpIndex, bgcolor=bearishOBColour,border_color=color.rgb(207,203,202, 100), extend=extend.right))
+        // add bearish bos line
+        if(showBearishBOS)
+            array.push(bosLines, line.new(structureLowIndex, structureLow, bar_index, structureLow, color= color.red, style=line.style_solid, width = 2))
+        // show bos candle
+        BosCandle:=true
+        // color mode bear
+        CandleColourMode:=0
+        lastShortIndex:=lastUpIndex
+        bearishAlert:=true
+
+// bullish break of structure?
+if((array.size(shortBoxes)>0))
+    for i = (array.size(shortBoxes)-1) to 0
+        sbox=array.get(shortBoxes,i)  
+        lstart=array.get(shortBoxStart, i)  
+        lstate=array.get(shortBoxState, i)
+        top=box.get_top(sbox)
+        left=box.get_left(sbox)
+        bottom=box.get_bottom(sbox)
+        if(high>bottom and low < bottom and bar_index>lstart and lstate==0 and useMitigatedBlocks)
+            sbox.set_bgcolor(mitigatedOBColour)
+            shortRetestCandle:=true
+            array.set(shortBoxState, i, 1)
+        if(bullishBreakerSource>top)
+            // remove the short box 
+            box.delete(sbox)
+            array.remove(shortBoxState, i)
+            array.remove(shortBoxes, i)
+            array.remove(shortBoxStart, i)
+            bullishAlert:=true
+            // ok to draw?
+            if((bar_index - lastDownIndex) < 1000 and bar_index>lastLongIndex) 
+                // add bullish order block
+                array.push(longBoxStart, bar_index+1)
+                array.push(longBoxState, 0)
+                array.push(longBoxes, box.new(left=lastDownIndex, top=lastDown, bottom=lastLow,right=lastDownIndex, bgcolor=bullishOBColour,border_color=color.rgb(207,203,202, 100), extend=extend.right))
+                // add bullish bos line
+                if(showBullishBOS)
+                    array.push(bosLines, line.new(left, top, bar_index, top, color= color.green, style=line.style_solid, width = 1))
+                // show bos candle
+                BosCandle:=true
+                // colour mode bullish
+                CandleColourMode:=1
+                // record last bull bar index to prevent duplication
+                lastLongIndex:=bar_index
+                lastBullBreakLow:=low
+
+// alerts
+alertcondition(bullishAlert and showAlerts, "Bullish break of structure", 'bullish break of structure was triggered')
+alertcondition(bearishAlert and showAlerts, "Bearish break of structure", 'bearish break of structure was triggered')
+alertcondition(shortRetestCandle and showAlerts, "Bearish order block re-tested", 'bearish order block has been re-tested')
+alertcondition(longRetestCandle and showAlerts, "Bullish order block re-tested", 'bullish order block has been re-tested')
+
+// update bullish order blocks
+if((array.size(longBoxes) > 0))
+    for i = (array.size(longBoxes)-1) to 0
+        lbox=array.get(longBoxes,i)
+        lstart=array.get(longBoxStart, i)
+        lstate=array.get(longBoxState, i)
+        bottom=box.get_bottom(lbox)
+        top=box.get_top(lbox)
+        boxLeft=box.get_left(lbox)
+        if(low<=top and high>top and bar_index>lstart and lstate==0)
+            if(useMitigatedBlocks)
+                lbox.set_bgcolor(mitigatedOBColour)
+            longRetestCandle:=true
+            array.set(longBoxState, i, 1)
+        if(close<bottom)
+            array.remove(longBoxStart, i)
+            array.remove(longBoxState, i)
+            array.remove(longBoxes, i)
+            box.delete(lbox)
+
+
+// candle colouring
+CandleColour= CandleColourMode==1?bullishTrendColor:bearishTrendColour
+CandleColour:= BosCandle and showBreakerCandles?BOSCandleColour:CandleColour
+CandleColour:=shortRetestCandle and showRetestCandles?shortRetestCandleColour:CandleColour
+CandleColour:=longRetestCandle and showRetestCandles?longRetestCandleColour:CandleColour
+barcolor(showTrendColours?CandleColour:na)
+barcolor(showBreakerCandles and BosCandle?CandleColour:na)
+
+// record last up and down candles
+if(close<open)
+    lastDown:=high
+    lastDownIndex:=bar_index
+    lastLow:=low
+
+if(close>open)
+    lastUp:=close
+    lastUpIndex:=bar_index
+    lastUpOpen:=open
+    lastUpLow:=low
+    lastHigh:=high
+    
+// update last high/low for more accurate order block placements
+lastHigh:=high>lastHigh?high:lastHigh
+lastLow:=low<lastLow?low:lastLow
+
+// "Ichimoku Cloud"
+conversionPeriods = input.int(9, minval=1, title="Conversion Line Length")
+basePeriods = input.int(26, minval=1, title="Base Line Length")
+laggingSpan2Periods = input.int(52, minval=1, title="Leading Span B Length")
+displacement = input.int(26, minval=1, title="Lagging Span")
+donchian(len) => math.avg(ta.lowest(len), ta.highest(len))
+conversionLine = donchian(conversionPeriods)
+baseLine = donchian(basePeriods)
+leadLine1 = math.avg(conversionLine, baseLine)
+leadLine2 = donchian(laggingSpan2Periods)
+plot(conversionLine, color=#2962FF, title="Conversion Line")
+plot(baseLine, color=#B71C1C, title="Base Line")
+plot(close, offset = -displacement + 1, color=#43A047, title="Lagging Span")
+ichimoku_p1 = plot(leadLine1, offset = displacement - 1, color=#A5D6A7,
+	 title="Leading Span A")
+ichimoku_p2 = plot(leadLine2, offset = displacement - 1, color=#EF9A9A,
+	 title="Leading Span B")
+plot(leadLine1 > leadLine2 ? leadLine1 : leadLine2, offset = displacement - 1, title = "Kumo Cloud Upper Line", display = display.none) 
+plot(leadLine1 < leadLine2 ? leadLine1 : leadLine2, offset = displacement - 1, title = "Kumo Cloud Lower Line", display = display.none) 
+fill(ichimoku_p1, ichimoku_p2, color = leadLine1 > leadLine2 ? color.rgb(67, 160, 71, 90) : color.rgb(244, 67, 54, 90))
