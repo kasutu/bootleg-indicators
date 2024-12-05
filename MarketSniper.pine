@@ -312,8 +312,8 @@ lastHigh:=high>lastHigh?high:lastHigh
 lastLow:=low<lastLow?low:lastLow
 
 // CME gap
-var C_PRIMARY = input.color(CME_COLOR_BULLISH_FILL, title="Bull")
-var C_SECONDARY = input.color(CME_COLOR_BEARISH_FILL, title="Bear")
+var C_PRIMARY = input.color(CME_COLOR_BULLISH_FILL, title="Bullish", group = 'CME gap')
+var C_SECONDARY = input.color(CME_COLOR_BEARISH_FILL, title="Bearish", group = 'CME gap')
 
 friday_close = ta.valuewhen(dayofweek == dayofweek.friday, cme_btc, 0)
 should_plot = (dayofweek == dayofweek.friday and hour > 23) or dayofweek == dayofweek.saturday or dayofweek == dayofweek.sunday
