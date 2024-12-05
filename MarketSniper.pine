@@ -266,7 +266,7 @@ if((array.size(shortBoxes)>0))
                 array.push(longBoxes, box.new(left=lastDownIndex, top=lastDown, bottom=lastLow,right=lastDownIndex, bgcolor=OB_COLOR_BULLISH_FILL, border_color=OB_COLOR_BULLISH_BORDER, border_style=line.style_dashed, extend=extend.right))
                 // add bullish bos line
                 if(showBullishBOS)
-                    array.push(bosLines, line.new(lastDownIndex, top, bar_index, top, color=COLOR_BULLISH_LIGHT_BLUE, style=line.style_dotted, width = 1))
+                    array.push(bosLines, line.new(left, top, bar_index, top, color=COLOR_BULLISH_LIGHT_BLUE, style=line.style_dotted, width = 1))
                     label.new((left + bar_index) / 2, top, text="BOS", color=na, style=label.style_label_center, textcolor=COLOR_BULLISH_LIGHT_BLUE, size=size.tiny)
                 // colour mode bullish
                 // record last bull bar index to prevent duplication
