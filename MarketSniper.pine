@@ -1,0 +1,442 @@
+//@version=5
+indicator("Market Sniper [Scientist-kasutu]", overlay=true, max_lines_count = 500, max_labels_count = 500, max_bars_back=5000, format = format.volume)
+
+// #################### COLOR SCHEME ####################
+// Primary (blue tones)
+COLOR_PRIMARY_DARK_BLUE = color.new(#1065AB, 0)  // Dark blue
+COLOR_PRIMARY_MEDIUM_BLUE = color.new(#3A93C3, 0)  // Medium blue
+COLOR_PRIMARY_LIGHT_BLUE = color.new(#8EC4DE, 0)  // Light blue
+
+// Secondary (red tones)
+COLOR_SECONDARY_LIGHT_RED = color.new(#D95F4C, 0)  // Light red
+COLOR_SECONDARY_MEDIUM_RED = color.new(#B33129, 0)  // Medium red
+COLOR_SECONDARY_DARK_RED = color.new(#991215, 0)  // Dark red
+
+// Accent (white to peach tones)
+COLOR_ACCENT_WHITE = color.new(#F9F9F9, 0)  // Pure white
+COLOR_ACCENT_PEACH = color.new(#FEDBC7, 0)  // Peach
+COLOR_ACCENT_LIGHT_PEACH = color.new(#FECBBA, 0)  // Light peach
+
+// Muted (neutral tones)
+COLOR_MUTED_PALE_BLUE_GRAY = color.new(#D1E5F0, 0)  // Pale blue-gray
+COLOR_MUTED_PALE_PEACH_BEIGE = color.new(#F6EBE2, 0)  // Pale peach-beige
+
+// Muted (Neutral tones) with darker background
+COLOR_MUTED_DARK_BLUE_GRAY = color.new(#A3B8C7, 60)  // Darker blue-gray with reduced opacity
+COLOR_MUTED_DARK_PEACH_BEIGE = color.new(#E0C9B2, 60)  // Darker peach-beige with reduced opacity
+
+// Border
+COLOR_BORDER_WHITE = color.new(#FFFFFF, 0)  // White border
+COLOR_BORDER_DARK_RED = color.new(#B33020, 0)  // Dark red border
+COLOR_BORDER_DARK_BLUE = color.new(#0F5E9A, 0)  // Dark blue border
+
+// Bullish (blue tones)
+COLOR_BULLISH_LIGHT_BLUE = color.new(#A3C9F7, 0)  // Light blue
+COLOR_BULLISH_MEDIUM_BLUE = color.new(#5C9ED6, 0)  // Medium blue
+COLOR_BULLISH_DARK_BLUE = color.new(#215A96, 0)  // Dark blue
+
+// Bearish (red tones)
+COLOR_BEARISH_LIGHT_RED = color.new(#F1948A, 0)  // Light pinkish-red
+COLOR_BEARISH_MEDIUM_RED = color.new(#CB4335, 0)  // Medium dark red
+COLOR_BEARISH_DARK_RED = color.new(#922B21, 0)  // Deep red-brown
+
+// Bullish Fills
+COLOR_BULLISH_FILL_LIGHT_BLUE = color.new(#A3C9F7, 90)  // Light blue with transparency
+COLOR_BULLISH_FILL_MEDIUM_BLUE = color.new(#5C9ED6, 80)  // Medium blue with transparency
+COLOR_BULLISH_FILL_DARK_BLUE = color.new(#215A96, 70)  // Dark blue with transparency
+
+// Bearish Fills
+COLOR_BEARISH_FILL_LIGHT_RED = color.new(#F1948A, 90)  // Light pinkish-red with transparency
+COLOR_BEARISH_FILL_MEDIUM_RED = color.new(#CB4335, 80)  // Medium dark red with transparency
+COLOR_BEARISH_FILL_DARK_RED = color.new(#922B21, 70)  // Deep red-brown with transparency
+
+// #################### COLOR DEFAULTS ####################
+// Bullish and Bearish Colors (Triple EMA)
+EMA_TRANSPARENCY =20
+EMA_BULLISH_LINE = color.new(COLOR_BULLISH_MEDIUM_BLUE, EMA_TRANSPARENCY)  
+EMA_BEARISH_LINE = color.new(COLOR_BEARISH_MEDIUM_RED, EMA_TRANSPARENCY) 
+EMA_BULLISH_ZONE = color.new(COLOR_BULLISH_FILL_LIGHT_BLUE, EMA_TRANSPARENCY)  
+EMA_BEARISH_ZONE = color.new(COLOR_BEARISH_FILL_LIGHT_RED, EMA_TRANSPARENCY)  
+
+ICHIMOKU_TRANSPARENCY_LINE = 60
+ICHIMOKU_TRANSPARENCY_ZONE = 98
+ICHIMOKU_BULLISH_LINE = color.new(COLOR_BULLISH_LIGHT_BLUE, ICHIMOKU_TRANSPARENCY_LINE)  
+ICHIMOKU_BEARISH_LINE = color.new(COLOR_BEARISH_MEDIUM_RED, ICHIMOKU_TRANSPARENCY_LINE) 
+ICHIMOKU_BULLISH_ZONE = color.new(COLOR_BULLISH_FILL_LIGHT_BLUE, ICHIMOKU_TRANSPARENCY_ZONE)  
+ICHIMOKU_BEARISH_ZONE = color.new(COLOR_BEARISH_FILL_LIGHT_RED, ICHIMOKU_TRANSPARENCY_ZONE)  
+
+// Order Block
+OB_TRANSPARENCY_BORDER = 90
+OB_TRANSPARENCY_FILL = 80
+OB_TRANSPARENCY_FILL_MITIGATED = 90
+OB_COLOR_BEARISH_BORDER = color.new(COLOR_BEARISH_LIGHT_RED, OB_TRANSPARENCY_BORDER) 
+OB_COLOR_BULLISH_BORDER = color.new(COLOR_BULLISH_LIGHT_BLUE, OB_TRANSPARENCY_BORDER) 
+OB_COLOR_BEARISH_FILL = color.new(COLOR_BEARISH_FILL_DARK_RED, OB_TRANSPARENCY_FILL) 
+OB_COLOR_BULLISH_FILL = color.new(COLOR_BULLISH_FILL_DARK_BLUE, OB_TRANSPARENCY_FILL) 
+OB_COLOR_BEARISH_MITIGATED = color.new(COLOR_MUTED_DARK_PEACH_BEIGE, OB_TRANSPARENCY_FILL_MITIGATED)
+OB_COLOR_BULLISH_MITIGATED = color.new(COLOR_MUTED_DARK_BLUE_GRAY, OB_TRANSPARENCY_FILL_MITIGATED)
+
+CME_TRANSPARENCY_FILL = 95
+CME_COLOR_BEARISH_FILL = color.new(COLOR_BEARISH_FILL_MEDIUM_RED, CME_TRANSPARENCY_FILL) 
+CME_COLOR_BULLISH_FILL = color.new(COLOR_BULLISH_FILL_MEDIUM_BLUE, CME_TRANSPARENCY_FILL) 
+
+// #################### INPUTS ####################
+// EMA Inputs
+ema1_length = input.int(20, title="EMA 1 (thin) Length", minval=1, group = 'Triple EMA Crossover')
+ema2_length = input.int(50, title="EMA 2 (mid) Length", minval=1, group = 'Triple EMA Crossover')
+ema3_length = input.int(200, title="EMA 3 (thick) Length", minval=1, group = 'Triple EMA Crossover')
+zone_width = input.int(15, title="Zone Width", minval=1, group = 'Triple EMA Crossover')
+
+// EMA Toggle for EMA 1
+show_ema1 = input.bool(true, title="Show EMA 1", group = 'Triple EMA Crossover')
+
+// Ichimoku Cloud inputs
+conversionPeriods = input.int(9, minval=1, title="Conversion Line Length" , group = 'Ichimoku Cloud')
+basePeriods = input.int(26, minval=1, title="Base Line Length" , group = 'Ichimoku Cloud')
+laggingSpan2Periods = input.int(52, minval=1, title="Leading Span B Length" , group = 'Ichimoku Cloud')
+displacement = input.int(26, minval=1, title="Lagging Span" , group = 'Ichimoku Cloud')
+
+// Order Blocks
+inputRange = input.int(25, "Candle Range", minval=5, maxval=100, step=1, group = 'Order Blocks')
+blocksLength = input.int(0, "Blocks Length", minval=0, maxval=500, step=1, group = 'Order Blocks')
+bullishBreakerSource = input.source(close, title="Bullish Breaker Source", group = 'Order Blocks')
+bearishBreakerSource = input.source(close, title="Bearish Breaker Source", group = 'Order Blocks')
+
+// optional displays
+showBearishBOS = input.bool(true, "Show Bearsish BOS Line", group = 'Order Blocks')
+showBullishBOS = input.bool(true, "Show Bullish BOS Line", group = 'Order Blocks')
+useMitigatedBlocks = input.bool(true, "Show Mitigated Blocks", group = 'Order Blocks')
+
+// Auto Trend Lines v2
+startyear = input.int(defval = 2020, title = "Start Year", group = 'Auto Trend Lines')
+startmonth = input.int(defval = 1, title = "Start Month", group = 'Auto Trend Lines')
+startday = input.int(defval = 1, title = "Start day", group = 'Auto Trend Lines')
+prd = input.int(defval = 20, title="Pivot Period", minval = 10, maxval = 50, group = 'Auto Trend Lines')
+PPnum = input.int(defval = 3, title="Number of Pivot Points to check", minval = 2, maxval = 6, group = 'Auto Trend Lines')
+
+// #################### INITIALIZATION ####################
+// Order Blocks
+// tracking for entries
+var int lastDownIndex=0
+var float lastDown=0
+var float lastLow=0
+
+var int lastUpIndex=0
+var float lastUp=0
+var float lastUpLow=0
+var float lastUpOpen=0
+var float lastHigh=0
+var float lastBullBreakLow=0
+
+// structure
+var int structureLowIndex=0
+float structureLow=1000000
+
+// order block drawing arrays
+var longBoxes = array.new_box()
+var longBoxStart = array.new_int()
+var longBoxState = array.new_int()
+var shortBoxes = array.new_box()
+var shortBoxStart = array.new_int()
+var shortBoxState = array.new_int()
+var bosLines = array.new_line()
+
+var int lastLongIndex=0
+var int lastShortIndex=0
+
+// CME gap
+// Gradient function copied from PineCoders https://www.tradingview.com/v/hqH4YIFa/
+f_c_gradientAdvDecPro(_source, _center, _steps, _c_bearWeak, _c_bearStrong, _c_bullWeak, _c_bullStrong) =>
+    var float _qtyAdvDec = 0.
+    var float _maxSteps  = math.max(1, _steps)
+    bool  _xUp     = ta.crossover(_source, _center)
+    bool  _xDn     = ta.crossunder(_source, _center)
+    float _chg     = ta.change(_source)
+    bool  _up      = _chg > 0
+    bool  _dn      = _chg < 0
+    bool  _srcBull = _source > _center
+    bool  _srcBear = _source < _center
+    _qtyAdvDec := 
+      _srcBull ? _xUp ? 1 : _up ? math.min(_maxSteps, _qtyAdvDec + 1) : _dn ? math.max(1, _qtyAdvDec - 1) : _qtyAdvDec :
+      _srcBear ? _xDn ? 1 : _dn ? math.min(_maxSteps, _qtyAdvDec + 1) : _up ? math.max(1, _qtyAdvDec - 1) : _qtyAdvDec : _qtyAdvDec
+    var color _return = na
+    _return := 
+      _srcBull ? color.from_gradient(_qtyAdvDec, 1, _maxSteps, _c_bullWeak, _c_bullStrong) : 
+      _srcBear ? color.from_gradient(_qtyAdvDec, 1, _maxSteps, _c_bearWeak, _c_bearStrong) : _return
+
+// CME gap
+sym = syminfo.tickerid
+cme_btc = request.security(sym, "D", close)
+
+// Auto Trend Lines
+var float[] tval = array.new_float(PPnum)
+var int[] tpos = array.new_int(PPnum)
+var float[] bval = array.new_float(PPnum)
+var int[] bpos = array.new_int(PPnum)
+
+// Function to update arrays (Auto Trend Lines)
+add_to_array(apointer1, apointer2, val)=>
+    array.unshift(apointer1, val)
+    array.unshift(apointer2, bar_index)
+    array.pop(apointer1)
+    array.pop(apointer2)
+
+// #################### CALCULATIONS ####################
+// Calculate EMAs (triple EMA)
+ema1 = ta.ema(close, ema1_length)
+ema2 = ta.ema(close, ema2_length)
+ema3 = ta.ema(close, ema3_length)
+ema1_color = (ema1 > ema2) ? EMA_BULLISH_LINE : EMA_BEARISH_LINE  // EMA 1 (20) color
+ema2_color = (ema2 > ema3) ? EMA_BULLISH_LINE : EMA_BEARISH_LINE  // EMA 2 (50) color
+zone_color = (ema2 > ema1) ? EMA_BULLISH_ZONE : EMA_BEARISH_ZONE  // Zone fill color based on EMA relationships
+
+// Ichimoku Cloud Logic
+donchian(len) => math.avg(ta.lowest(len), ta.highest(len))
+conversionLine = donchian(conversionPeriods)
+baseLine = donchian(basePeriods)
+leadLine1 = math.avg(conversionLine, baseLine)
+leadLine2 = donchian(laggingSpan2Periods)
+
+// Order Blocks Logic
+structureLowIndexPointer(len) =>
+    float minValue = ta.highest(high, inputRange)[1]
+    int minIndex = bar_index 
+    for i = 1 to len
+        if low[i] < minValue
+            minValue := low[i]
+            minIndex := bar_index[i]
+    minIndex
+
+withinBullishBlock(position) =>
+    bool result = false
+    if((array.size(longBoxes)>0))
+        for i = (array.size(longBoxes)-1) to 0
+            box=array.get(longBoxes,i)
+            top=box.get_top(box)
+            bottom=box.get_bottom(box)
+            if(position<top and position>bottom)
+                result:=true
+    result
+
+
+// get the lowest point in the range
+structureLow:=ta.lowest(low, inputRange)[1]
+structureLowIndex:=structureLowIndexPointer(inputRange)
+
+
+// bearish break of structure
+if(ta.crossunder(bearishBreakerSource,structureLow))
+    if((bar_index - lastUpIndex) < 1000)
+        // add bear order block
+        array.push(shortBoxStart, bar_index)
+        array.push(shortBoxState, 0)
+        array.push(shortBoxes,box.new(left=lastUpIndex, top=lastHigh, bottom=lastUpLow,right=lastUpIndex, bgcolor=OB_COLOR_BEARISH_FILL, border_color=OB_COLOR_BEARISH_BORDER, border_style=line.style_dashed, extend=extend.right))
+        // add bearish bos line
+        if(showBearishBOS)
+            array.push(bosLines, line.new(structureLowIndex, structureLow, bar_index, structureLow, color=COLOR_BEARISH_LIGHT_RED, style=line.style_dotted, width = 1))
+            label.new((structureLowIndex + bar_index) / 2, structureLow, text="BOS", color=na, style=label.style_label_center, textcolor=COLOR_BEARISH_LIGHT_RED, size=size.tiny)
+        // color mode bear
+        lastShortIndex:=lastUpIndex
+
+// bullish break of structure?
+if((array.size(shortBoxes)>0))
+    for i = (array.size(shortBoxes)-1) to 0
+        sbox=array.get(shortBoxes,i)  
+        lstart=array.get(shortBoxStart, i)  
+        lstate=array.get(shortBoxState, i)
+        top=box.get_top(sbox)
+        left=box.get_left(sbox)
+        bottom=box.get_bottom(sbox)
+        if(high > bottom and low < bottom and bar_index > lstart and lstate==0 and useMitigatedBlocks)
+            sbox.set_bgcolor(OB_COLOR_BEARISH_MITIGATED)
+            sbox.set_right(bar_index + blocksLength)  // Update the right extension to stop at the current bar index
+            sbox.set_extend(extend.none)  // Stop extending beyond the current point
+            array.set(shortBoxState, i, 1)
+        if(bullishBreakerSource>top)
+            // remove the short box 
+            box.delete(sbox)
+            array.remove(shortBoxState, i)
+            array.remove(shortBoxes, i)
+            array.remove(shortBoxStart, i)
+            // ok to draw?
+            if((bar_index - lastDownIndex) < 1000 and bar_index>lastLongIndex) 
+                // add bullish order block
+                array.push(longBoxStart, bar_index+1)
+                array.push(longBoxState, 0)
+                array.push(longBoxes, box.new(left=lastDownIndex, top=lastDown, bottom=lastLow,right=lastDownIndex, bgcolor=OB_COLOR_BULLISH_FILL, border_color=OB_COLOR_BULLISH_BORDER, border_style=line.style_dashed, extend=extend.right))
+                // add bullish bos line
+                if(showBullishBOS)
+                    array.push(bosLines, line.new(lastDownIndex, top, bar_index, top, color=COLOR_BULLISH_LIGHT_BLUE, style=line.style_dotted, width = 1))
+                    label.new((left + bar_index) / 2, top, text="BOS", color=na, style=label.style_label_center, textcolor=COLOR_BULLISH_LIGHT_BLUE, size=size.tiny)
+                // colour mode bullish
+                // record last bull bar index to prevent duplication
+                lastLongIndex:=bar_index
+                lastBullBreakLow:=low
+
+// update bullish order blocks
+if((array.size(longBoxes) > 0))
+    for i = (array.size(longBoxes)-1) to 0
+        lbox=array.get(longBoxes,i)
+        lstart=array.get(longBoxStart, i)
+        lstate=array.get(longBoxState, i)
+        bottom=box.get_bottom(lbox)
+        top=box.get_top(lbox)
+        boxLeft=box.get_left(lbox)
+        if(low<=top and high>top and bar_index>lstart and lstate==0)
+            if(useMitigatedBlocks)
+                lbox.set_bgcolor(OB_COLOR_BULLISH_MITIGATED)
+                lbox.set_right(bar_index + blocksLength)  // Update the right extension to stop at the current bar index
+                lbox.set_extend(extend.none)  // Stop extending beyond the current point
+            array.set(longBoxState, i, 1)
+        if(close<bottom)
+            array.remove(longBoxStart, i)
+            array.remove(longBoxState, i)
+            array.remove(longBoxes, i)
+            box.delete(lbox)
+
+// record last up and down candles
+if(close<open)
+    lastDown:=high
+    lastDownIndex:=bar_index
+    lastLow:=low
+
+if(close>open)
+    lastUp:=close
+    lastUpIndex:=bar_index
+    lastUpOpen:=open
+    lastUpLow:=low
+    lastHigh:=high
+    
+// update last high/low for more accurate order block placements
+lastHigh:=high>lastHigh?high:lastHigh
+lastLow:=low<lastLow?low:lastLow
+
+// CME gap
+var C_PRIMARY = input.color(CME_COLOR_BULLISH_FILL, title="Bull")
+var C_SECONDARY = input.color(CME_COLOR_BEARISH_FILL, title="Bear")
+
+friday_close = ta.valuewhen(dayofweek == dayofweek.friday, cme_btc, 0)
+should_plot = (dayofweek == dayofweek.friday and hour > 23) or dayofweek == dayofweek.saturday or dayofweek == dayofweek.sunday
+
+// Auto trend Lines
+// Pivot High and Pivot Low
+float _ph = ta.pivothigh(prd, prd)
+float ph = na(_ph) ? na : _ph
+float _pl = ta.pivotlow(prd, prd)
+float pl = na(_pl) ? na : _pl
+
+// Add pivot highs and lows to the arrays
+if not na(ph)
+    add_to_array(tval, tpos, ph)
+
+if not na(pl)
+    add_to_array(bval, bpos, pl)
+
+// line definitions
+maxline = 3
+var bln = array.new_line(maxline, na)
+var tln = array.new_line(maxline, na)
+
+// loop for pivot points to check if there is possible trend line
+countlinelo = 0
+countlinehi = 0
+
+starttime = timestamp(startyear, startmonth, startday, 0, 0, 0)
+
+if time >= starttime
+    for x = 0 to maxline - 1
+        line.delete(array.get(bln, x))
+        line.delete(array.get(tln, x))
+    for p1 = 0 to PPnum - 2 
+        uv1 = 0.0
+        uv2 = 0.0
+        up1 = 0
+        up2 = 0
+        if countlinelo <= maxline
+            for p2 = PPnum - 1 to p1 + 1
+                val1 = array.get(bval, p1)
+                val2 = array.get(bval, p2)
+                pos1 = array.get(bpos, p1)
+                pos2 = array.get(bpos, p2)
+                if val1 > val2
+                    diff = (val1 - val2) / (pos1 - pos2)
+                    hline = val2 + diff
+                    lloc = bar_index
+                    lval = low
+                    valid = true
+                    for x = pos2 + 1 - prd to bar_index
+                        if close[bar_index - x] < hline
+                            valid := false
+                            break
+                        lloc := x
+                        lval := hline
+                        hline := hline + diff
+                    
+                        
+                    if valid
+                        uv1 := hline - diff
+                        uv2 := val2
+                        up1 := lloc
+                        up2 := pos2
+                        break
+
+        dv1 = 0.0
+        dv2 = 0.0
+        dp1 = 0
+        dp2 = 0                
+        if countlinehi <= maxline
+            for p2 = PPnum - 1 to p1 + 1                
+                val1 = array.get(tval, p1)
+                val2 = array.get(tval, p2)
+                pos1 = array.get(tpos, p1)
+                pos2 = array.get(tpos, p2)
+                if val1 < val2
+                    diff = (val2 - val1) / float(pos1 - pos2)
+                    hline = val2 - diff
+                    lloc = bar_index
+                    lval = high
+                    valid = true
+                    for x = pos2 + 1 - prd to bar_index
+                        if close[bar_index - x] > hline
+                            valid := false
+                            break
+                        lloc := x
+                        lval := hline
+                        hline := hline - diff
+                        
+                    if valid
+                        dv1 := hline + diff
+                        dv2 := val2
+                        dp1 := lloc
+                        dp2 := pos2
+                        break
+                         
+        // if there is continues uptrend line then draw it
+        if up1 != 0 and up2 != 0 and countlinelo < maxline
+            countlinelo += 1
+            array.set(bln, countlinelo - 1, line.new(up2 - prd, uv2, up1, uv1, color = COLOR_BULLISH_LIGHT_BLUE))
+        
+        // if there is continues downtrend line then draw it
+        if dp1 != 0 and dp2 != 0 and countlinehi < maxline
+            countlinehi += 1
+            array.set(tln, countlinehi - 1, line.new(dp2 - prd, dv2, dp1, dv1, color = COLOR_BEARISH_LIGHT_RED))
+
+// #################### VISUALIZATION ####################
+// Triple EMA
+plot(ema1, color=show_ema1 ? ema1_color : na, linewidth=1, title="EMA 1 (20)")  // EMA 1 changes color based on EMA 50
+plot(ema2, color=ema2_color, linewidth=2, title="EMA 2 (50)")  // EMA 2 changes color based on EMA 200
+plot(ema3, color=(ema3 > ema2) ? EMA_BEARISH_LINE : EMA_BULLISH_LINE, linewidth=3, title="EMA 3 (200)")  // Corrected color condition for EMA 3
+plot(ema2, color=color.new(zone_color, 80), linewidth=zone_width, title="EMA 2 Outline")  // Outline using zone color
+
+// Ichimoku Cloud Render
+ichimoku_p1 = plot(leadLine1, offset = displacement - 1, color=ICHIMOKU_BULLISH_LINE, title="Leading Span A")
+ichimoku_p2 = plot(leadLine2, offset = displacement - 1, color=ICHIMOKU_BEARISH_LINE, title="Leading Span B")
+plot(leadLine1 > leadLine2 ? leadLine1 : leadLine2, offset = displacement - 1, title = "Kumo Cloud Upper Line", display = display.none) 
+plot(leadLine1 < leadLine2 ? leadLine1 : leadLine2, offset = displacement - 1, title = "Kumo Cloud Lower Line", display = display.none) 
+fill(ichimoku_p1, ichimoku_p2, color = leadLine1 > leadLine2 ? ICHIMOKU_BULLISH_ZONE : ICHIMOKU_BEARISH_ZONE)
+
+// CME gap
+p1 = plot(should_plot ? close : na, title='Candle Close', color=C_PRIMARY, style=plot.style_linebr)
+p2 = plot(should_plot ? friday_close : na, title="CME Close", color=C_SECONDARY, style=plot.style_linebr, linewidth=3)
+color cc = f_c_gradientAdvDecPro(close, friday_close, 15, color.new(C_PRIMARY, CME_TRANSPARENCY_FILL - 5), C_PRIMARY, color.new(C_SECONDARY, CME_TRANSPARENCY_FILL - 5), C_SECONDARY)
+fill(p1, p2, cc)
