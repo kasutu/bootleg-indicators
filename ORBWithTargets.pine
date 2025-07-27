@@ -4,6 +4,7 @@ indicator("ORB + Targets [kasutufx]", overlay=true)
 // Inputs
 inputMax = input(5, title="ORB total time (minutes)")
 sess = input.session("0915-0920", title="Session Time") 
+timezone_input = input.string("America/New_York", title="Timezone", options=["America/New_York", "America/Chicago", "America/Los_Angeles", "Europe/London", "Asia/Tokyo", "Asia/Shanghai", "Australia/Sydney"])
 volConfirm = input.bool(true, title="Require Volume Confirmation")
 volMultiplier = input.float(1.5, title="Volume Multiplier", minval=1.0, maxval=5.0)
 dark_mode = input.bool(true, "Dark Mode", tooltip="Toggle between light and dark monochrome theme")
@@ -14,30 +15,40 @@ label_bg_color = dark_mode ? color.white : color.black
 label_text_color = dark_mode ? color.black : color.white
 
 // Session logic
-t = time(timeframe.period, sess + ":1234567")
+t = time(timeframe.period, sess + ":1234567", timezone_input)
 hide = timeframe.isintraday and timeframe.multiplier <= inputMax
 in_session = not na(t)
 is_first = in_session and not in_session[1]
 
-// ORB levels
-orb_high = float(na)
-orb_low = float(na)
+// ORB levels - using var to retain historical values
+var float orb_high = na
+var float orb_low = na
 
 if is_first
     orb_high := high
     orb_low := low
-else
-    orb_high := orb_high[1]
-    orb_low := orb_low[1]
-if high > orb_high and in_session
-    orb_high := high
-if low < orb_low and in_session
-    orb_low := low
+else if in_session
+    if high > orb_high
+        orb_high := high
+    if low < orb_low
+        orb_low := low
 
 // Target levels
 orb_range = orb_high - orb_low
-target_levels = array.from(orb_high + orb_range * 2, orb_high + orb_range * 4, orb_high + orb_range * 6, 
-                          orb_low - orb_range * 2, orb_low - orb_range * 4, orb_low - orb_range * 6)
+target_levels = array.from(orb_high + orb_range * 2, orb_high + orb_range * 4, orb_high + orb_range * 6, orb_low - orb_range * 2, orb_low - orb_range * 4, orb_low - orb_range * 6)
+
+// Historical target levels using var to retain values
+var float tp1_bull = na, var float tp2_bull = na, var float tp3_bull = na
+var float tp1_bear = na, var float tp2_bear = na, var float tp3_bear = na
+
+// Update target levels when ORB range changes
+if not na(orb_range) and orb_range > 0
+    tp1_bull := orb_high + orb_range * 2
+    tp2_bull := orb_high + orb_range * 4
+    tp3_bull := orb_high + orb_range * 6
+    tp1_bear := orb_low - orb_range * 2
+    tp2_bear := orb_low - orb_range * 4
+    tp3_bear := orb_low - orb_range * 6
 
 // Breakout confirmation
 avgVolume = ta.sma(volume, 20)
@@ -45,28 +56,101 @@ volumeConfirmed = not volConfirm or (volume > avgVolume * volMultiplier)
 bullish_breakout = close > orb_high and close[1] <= orb_high and volumeConfirmed and not in_session
 bearish_breakout = close < orb_low and close[1] >= orb_low and volumeConfirmed and not in_session
 
-// Track confirmed breakouts
-var bool confirmed_bullish = false
-var bool confirmed_bearish = false
-var int session_start_bar = na
+// Track confirmed breakouts and session start
+var bool confirmed_bullish = false, var bool confirmed_bearish = false
+var int session_start_bar = na, var int entry_bar = na
+var int max_tp_hit = 0  // Track maximum TP level reached (0=none, 1=TP1, 2=TP2, 3=TP3)
+var bool position_closed = false, var bool exit_label_placed = false
+
+// Track session start bar - capture it when session first starts
+if is_first
+    session_start_bar := bar_index
+    confirmed_bullish := false
+    confirmed_bearish := false
+    max_tp_hit := 0
+    position_closed := false
+    exit_label_placed := false
+    entry_bar := na
+
+// Helper function to draw red box on breakout
+draw_breakout_box() =>
+    bg_color = color.new(color.red, 80)
+    box.new(left=entry_bar, top=orb_high, right=bar_index, bottom=orb_low, bgcolor=bg_color, border_color=color.new(color.gray, 50), border_width=1)
+
+// Variable to store the red box for updating
+var box red_box = na
 
 if bullish_breakout
     confirmed_bullish := true
     confirmed_bearish := false
+    max_tp_hit := 0
+    position_closed := false
+    exit_label_placed := false
+    entry_bar := bar_index
+    bg_color = color.new(color.red, 80)
+    red_box := box.new(left=entry_bar, top=orb_high, right=bar_index, bottom=orb_low, bgcolor=bg_color, border_color=color.new(color.gray, 50), border_width=1)
+    
 if bearish_breakout
     confirmed_bearish := true
     confirmed_bullish := false
-if is_first
-    confirmed_bullish := false
-    confirmed_bearish := false
-    session_start_bar := bar_index
+    max_tp_hit := 0
+    position_closed := false
+    exit_label_placed := false
+    entry_bar := bar_index
+    bg_color = color.new(color.red, 80)
+    red_box := box.new(left=entry_bar, top=orb_high, right=bar_index, bottom=orb_low, bgcolor=bg_color, border_color=color.new(color.gray, 50), border_width=1)
+
+// Track TP hits and stop loss for both directions
+if confirmed_bullish and not position_closed
+    if close >= tp3_bull and max_tp_hit < 3
+        max_tp_hit := 3
+    else if close >= tp2_bull and max_tp_hit < 2
+        max_tp_hit := 2
+    else if close >= tp1_bull and max_tp_hit < 1
+        max_tp_hit := 1
+    if close <= orb_low
+        position_closed := true
+        // Update red box to end at current bar when stop loss hit
+        if not na(red_box)
+            box.set_right(red_box, bar_index)
+
+if confirmed_bearish and not position_closed
+    if close <= tp3_bear and max_tp_hit < 3
+        max_tp_hit := 3
+    else if close <= tp2_bear and max_tp_hit < 2
+        max_tp_hit := 2
+    else if close <= tp1_bear and max_tp_hit < 1
+        max_tp_hit := 1
+    if close >= orb_high
+        position_closed := true
+        // Update red box to end at current bar when stop loss hit
+        if not na(red_box)
+            box.set_right(red_box, bar_index)
+
+// Draw green TP box when TP hit
+if (confirmed_bullish or confirmed_bearish) and not exit_label_placed and max_tp_hit > 0
+    exit_level = confirmed_bullish ? (max_tp_hit == 1 ? tp1_bull : max_tp_hit == 2 ? tp2_bull : tp3_bull) : (max_tp_hit == 1 ? tp1_bear : max_tp_hit == 2 ? tp2_bear : tp3_bear)
+    
+    // Update red box to end at current bar
+    if not na(red_box)
+        box.set_right(red_box, bar_index)
+    
+    bg_color = color.new(color.green, 80)
+    top_level = confirmed_bullish ? exit_level : orb_low
+    bottom_level = confirmed_bullish ? orb_high : exit_level
+    
+    box.new(left=entry_bar, top=top_level, right=bar_index, bottom=bottom_level, bgcolor=bg_color, border_color=color.new(color.gray, 50), border_width=1)
+    exit_label_placed := true
+
+// Plot ORB levels with historical retention
+plot(hide and not na(orb_high) ? orb_high : na, style=plot.style_line, color=orb_high[1] != orb_high ? na : line_color, title="ORB High", linewidth=1)
+plot(hide and not na(orb_low) ? orb_low : na, style=plot.style_line, color=orb_low[1] != orb_low ? na : line_color, title="ORB Low", linewidth=1)
 
 // Helper function to draw lines and labels
 draw_level(start_bar, level, text_label, line_width = 1) =>
     if barstate.islast and hide and not na(level) and not na(start_bar)
         line.new(x1=start_bar, y1=level, x2=bar_index, y2=level, color=line_color, width=line_width)
-        label.new(x=bar_index, y=level, text=text_label, style=label.style_label_left, 
-                 color=label_bg_color, textcolor=label_text_color, size=size.small)
+        label.new(x=bar_index, y=level, text=text_label, style=label.style_label_left, color=label_bg_color, textcolor=label_text_color, size=size.small)
 
 // Draw ORB levels and targets after confirmed breakout
 if confirmed_bullish

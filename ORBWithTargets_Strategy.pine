@@ -1,0 +1,146 @@
+//@version=6
+strategy("ORB + Targets Strategy [kasutufx]", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, initial_capital=50, margin_long=0.2, margin_short=0.2)
+
+// Inputs
+inputMax = input(5, title="ORB total time (minutes)")
+sess = input.session("0930-0935", title="Session Time", tooltip="Use 0930-0935 for US market or adjust for your timezone") 
+volConfirm = input.bool(false, title="Require Volume Confirmation", tooltip="Disable for crypto/24h markets")
+volMultiplier = input.float(1.5, title="Volume Multiplier", minval=1.0, maxval=5.0)
+dark_mode = input.bool(true, "Dark Mode", tooltip="Toggle between light and dark monochrome theme")
+enable_session_filter = input.bool(true, title="Enable Session Filter", tooltip="Disable for 24/7 markets like crypto")
+
+// Strategy specific inputs
+leverage = input.float(500.0, title="Leverage", minval=1.0, maxval=1000.0)
+risk_percent = input.float(10.0, title="Risk per Trade (%)", minval=0.1, maxval=50.0)
+tp_level = input.int(1, title="Take Profit Level (1-3)", minval=1, maxval=3)
+use_trailing_stop = input.bool(false, title="Use Trailing Stop")
+trailing_offset = input.float(0.5, title="Trailing Stop Offset (%)", minval=0.1, maxval=5.0)
+
+// Session logic
+t = enable_session_filter ? time(timeframe.period, sess + ":1234567") : time(timeframe.period)
+in_session = enable_session_filter ? not na(t) : true
+
+// For session-based ORB, detect first bar of session or day
+is_first = enable_session_filter ? (in_session and not in_session[1]) : (ta.change(time("1D")) != 0)
+
+// ORB levels - Modified for better backtesting
+var float orb_high = na
+var float orb_low = na
+var int orb_bars_count = 0
+var bool orb_formation_complete = false
+
+if is_first
+    orb_high := high
+    orb_low := low
+    orb_bars_count := 1
+    orb_formation_complete := false
+else if enable_session_filter and in_session and orb_bars_count < inputMax
+    if high > orb_high
+        orb_high := high
+    if low < orb_low
+        orb_low := low
+    orb_bars_count := orb_bars_count + 1
+else if not enable_session_filter and orb_bars_count < inputMax
+    if high > orb_high
+        orb_high := high
+    if low < orb_low
+        orb_low := low
+    orb_bars_count := orb_bars_count + 1
+
+// Mark ORB formation as complete
+if orb_bars_count >= inputMax and not orb_formation_complete
+    orb_formation_complete := true
+
+// Target levels
+orb_range = orb_high - orb_low
+bullish_tp1 = orb_high + orb_range * 2
+bullish_tp2 = orb_high + orb_range * 4
+bullish_tp3 = orb_high + orb_range * 6
+bearish_tp1 = orb_low - orb_range * 2
+bearish_tp2 = orb_low - orb_range * 4
+bearish_tp3 = orb_low - orb_range * 6
+
+// Breakout confirmation - Modified for better backtesting
+avgVolume = ta.sma(volume, 20)
+volumeConfirmed = not volConfirm or (volume > avgVolume * volMultiplier)
+
+// Breakout conditions - only after ORB formation is complete
+can_breakout = orb_formation_complete and not na(orb_high) and not na(orb_low)
+bullish_breakout = can_breakout and close > orb_high and close[1] <= orb_high and volumeConfirmed
+bearish_breakout = can_breakout and close < orb_low and close[1] >= orb_low and volumeConfirmed
+
+// Track confirmed breakouts
+var bool confirmed_bullish = false
+var bool confirmed_bearish = false
+var int session_start_bar = na
+
+if bullish_breakout
+    confirmed_bullish := true
+    confirmed_bearish := false
+if bearish_breakout
+    confirmed_bearish := true
+    confirmed_bullish := false
+if is_first
+    confirmed_bullish := false
+    confirmed_bearish := false
+    session_start_bar := bar_index
+    orb_formation_complete := false
+
+// Calculate position size based on risk and leverage
+calculate_position_size(entry_price, stop_loss) =>
+    // Calculate risk amount in USD
+    risk_amount = strategy.equity * (risk_percent / 100)
+    
+    // Calculate price difference (stop loss distance)
+    price_diff = math.abs(entry_price - stop_loss)
+    
+    if price_diff > 0
+        // Calculate base position size without leverage
+        base_position_value = risk_amount / (price_diff / entry_price)
+        
+        // Apply leverage to determine actual position size
+        leveraged_position_value = base_position_value * leverage
+        
+        // Convert to quantity (units/shares)
+        qty = leveraged_position_value / entry_price
+        
+        // Ensure minimum position size
+        math.max(qty, 0.01)
+    else
+        0.01
+
+// Get target price based on selected level
+get_target_price(is_long) =>
+    if is_long
+        tp_level == 1 ? bullish_tp1 : tp_level == 2 ? bullish_tp2 : bullish_tp3
+    else
+        tp_level == 1 ? bearish_tp1 : tp_level == 2 ? bearish_tp2 : bearish_tp3
+
+// Strategy logic
+if bullish_breakout and strategy.position_size == 0
+    entry_price = close
+    stop_loss = orb_low
+    target_price = get_target_price(true)
+    qty = calculate_position_size(entry_price, stop_loss)
+    
+    strategy.entry("Long", strategy.long, qty=qty)
+    strategy.exit("Long Exit", "Long", stop=stop_loss, limit=target_price)
+    
+    if use_trailing_stop
+        strategy.exit("Long Trail", "Long", stop=stop_loss, trail_offset=entry_price * (trailing_offset / 100))
+
+if bearish_breakout and strategy.position_size == 0
+    entry_price = close
+    stop_loss = orb_high
+    target_price = get_target_price(false)
+    qty = calculate_position_size(entry_price, stop_loss)
+    
+    strategy.entry("Short", strategy.short, qty=qty)
+    strategy.exit("Short Exit", "Short", stop=stop_loss, limit=target_price)
+    
+    if use_trailing_stop
+        strategy.exit("Short Trail", "Short", stop=stop_loss, trail_offset=entry_price * (trailing_offset / 100))
+
+// Reset positions at start of new session/day
+if is_first and strategy.position_size != 0
+    strategy.close_all("Session Reset")
