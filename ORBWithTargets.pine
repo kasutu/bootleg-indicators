@@ -2,8 +2,8 @@
 indicator("ORB + Targets [kasutufx]", overlay=true)
 
 // Inputs
-inputMax = input(5, title="ORB total time (minutes)")
-sess = input.session("0915-0920", title="Session Time") 
+inputMax = input(15, title="ORB total time (minutes)")
+sess = input.session("0500-0520", title="Session Time") 
 timezone_input = input.string("America/New_York", title="Timezone", options=["America/New_York", "America/Chicago", "America/Los_Angeles", "Europe/London", "Asia/Tokyo", "Asia/Shanghai", "Australia/Sydney"])
 volConfirm = input.bool(true, title="Require Volume Confirmation")
 volMultiplier = input.float(1.5, title="Volume Multiplier", minval=1.0, maxval=5.0)
@@ -62,6 +62,10 @@ var int session_start_bar = na, var int entry_bar = na
 var int max_tp_hit = 0  // Track maximum TP level reached (0=none, 1=TP1, 2=TP2, 3=TP3)
 var bool position_closed = false, var bool exit_label_placed = false
 
+// Variables to store the boxes for updating
+var box red_box = na
+var box green_box = na
+
 // Track session start bar - capture it when session first starts
 if is_first
     session_start_bar := bar_index
@@ -71,14 +75,13 @@ if is_first
     position_closed := false
     exit_label_placed := false
     entry_bar := na
+    red_box := na
+    green_box := na
 
 // Helper function to draw red box on breakout
 draw_breakout_box() =>
     bg_color = color.new(color.red, 80)
     box.new(left=entry_bar, top=orb_high, right=bar_index, bottom=orb_low, bgcolor=bg_color, border_color=color.new(color.gray, 50), border_width=1)
-
-// Variable to store the red box for updating
-var box red_box = na
 
 if bullish_breakout
     confirmed_bullish := true
@@ -131,16 +134,23 @@ if confirmed_bearish and not position_closed
 if (confirmed_bullish or confirmed_bearish) and not exit_label_placed and max_tp_hit > 0
     exit_level = confirmed_bullish ? (max_tp_hit == 1 ? tp1_bull : max_tp_hit == 2 ? tp2_bull : tp3_bull) : (max_tp_hit == 1 ? tp1_bear : max_tp_hit == 2 ? tp2_bear : tp3_bear)
     
-    // Update red box to end at current bar
-    if not na(red_box)
-        box.set_right(red_box, bar_index)
-    
     bg_color = color.new(color.green, 80)
     top_level = confirmed_bullish ? exit_level : orb_low
     bottom_level = confirmed_bullish ? orb_high : exit_level
     
-    box.new(left=entry_bar, top=top_level, right=bar_index, bottom=bottom_level, bgcolor=bg_color, border_color=color.new(color.gray, 50), border_width=1)
+    // Create green box and store reference - both boxes end at current bar when TP hit
+    green_box := box.new(left=entry_bar, top=top_level, right=bar_index, bottom=bottom_level, bgcolor=bg_color, border_color=color.new(color.gray, 50), border_width=1)
+    
+    // Update red box to end at the same bar as green box (TP hit - stop extending)
+    if not na(red_box)
+        box.set_right(red_box, bar_index)
+    
     exit_label_placed := true
+    position_closed := true  // Mark position as closed when TP is hit
+
+// Continuously update boxes only if position is still active (no TP hit, no stop loss)
+if not na(red_box) and not position_closed and not exit_label_placed
+    box.set_right(red_box, bar_index)
 
 // Plot ORB levels with historical retention
 plot(hide and not na(orb_high) ? orb_high : na, style=plot.style_line, color=orb_high[1] != orb_high ? na : line_color, title="ORB High", linewidth=1)
