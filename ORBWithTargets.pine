@@ -159,8 +159,8 @@ plot(hide and not na(orb_low) ? orb_low : na, style=plot.style_line, color=orb_l
 // Helper function to draw lines and labels
 draw_level(start_bar, level, text_label, line_width = 1) =>
     if barstate.islast and hide and not na(level) and not na(start_bar)
-        line.new(x1=start_bar, y1=level, x2=bar_index, y2=level, color=line_color, width=line_width)
-        label.new(x=bar_index, y=level, text=text_label, style=label.style_label_left, color=label_bg_color, textcolor=label_text_color, size=size.small)
+        line.new(x1=start_bar, y1=level, x2=bar_index + 10, y2=level, color=line_color, width=line_width)
+        label.new(x=bar_index + 10, y=level, text=text_label, style=label.style_label_left, color=label_bg_color, textcolor=label_text_color, size=size.small)
 
 // Draw ORB levels and targets after confirmed breakout
 if confirmed_bullish
