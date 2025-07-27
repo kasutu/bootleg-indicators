@@ -10,8 +10,8 @@ dark_mode = input.bool(true, "Dark Mode", tooltip="Toggle between light and dark
 
 // Color scheme
 line_color = dark_mode ? color.white : color.black
-label_bg_color = dark_mode ? color.black : color.white
-label_text_color = dark_mode ? color.white : color.black
+label_bg_color = dark_mode ? color.white : color.black
+label_text_color = dark_mode ? color.black : color.white
 
 // Session logic
 t = time(timeframe.period, sess + ":1234567")
@@ -68,16 +68,16 @@ draw_level(start_bar, level, text_label, line_width = 1) =>
         label.new(x=bar_index, y=level, text=text_label, style=label.style_label_left, 
                  color=label_bg_color, textcolor=label_text_color, size=size.small)
 
-// Draw ORB levels
-draw_level(session_start_bar, orb_high, "Entry", 2)
-draw_level(session_start_bar, orb_low, "SL", 2)
-
-// Draw targets after confirmed breakout
+// Draw ORB levels and targets after confirmed breakout
 if confirmed_bullish
+    draw_level(session_start_bar, orb_high, "Entry", 2)
+    draw_level(session_start_bar, orb_low, "SL", 2)
     for i = 0 to 2
         draw_level(session_start_bar, array.get(target_levels, i), "TP" + str.tostring(i + 1))
 
 if confirmed_bearish
+    draw_level(session_start_bar, orb_low, "Entry", 2)
+    draw_level(session_start_bar, orb_high, "SL", 2)
     for i = 3 to 5
         draw_level(session_start_bar, array.get(target_levels, i), "TP" + str.tostring(i - 2))
 
