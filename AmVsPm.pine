@@ -145,18 +145,6 @@ if show_ranges
     if in_afternoon[1] and not in_afternoon and not na(afternoon_box)
         box.set_extend(afternoon_box, extend.none)
 
-// Add range labels and signals
-if show_ranges and barstate.islast
-    current_morning_range = not na(morning_high) and not na(morning_low) ? morning_high - morning_low : na
-    current_afternoon_range = not na(afternoon_high) and not na(afternoon_low) ? afternoon_high - afternoon_low : na
-    
-    // Add range labels to current boxes
-    if not na(morning_box) and not na(current_morning_range)
-        label.new(box.get_right(morning_box), (morning_high + morning_low) / 2, text=str.tostring(current_morning_range, "#.##"), style=label.style_label_left, color=label_bg_color, textcolor=label_text_color, size=size.small)
-    
-    if not na(afternoon_box) and not na(current_afternoon_range)
-        label.new(box.get_right(afternoon_box), (afternoon_high + afternoon_low) / 2, text=str.tostring(current_afternoon_range, "#.##"), style=label.style_label_left, color=label_bg_color, textcolor=label_text_color, size=size.small)
-
 // Plot range comparison for backtesting  
 plot(afternoon_greater ? 1 : 0, title="Afternoon > Morning", display=display.data_window, color=color.red)
 plot(morning_range, title="Morning Range", display=display.data_window, color=line_color)
