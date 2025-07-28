@@ -5,6 +5,7 @@ indicator("AM vs PM Range Analysis", shorttitle="AMvsPM", overlay=true)
 show_ranges = input.bool(true, "Show Range Boxes", group="Display")
 show_dashboard = input.bool(true, "Show Dashboard", group="Display")
 show_full_backtest = input.bool(false, "Show Full 50-Day Backtest Data", group="Display")
+max_boxes = input.int(20, "Max Historical Boxes", minval=5, maxval=50, tooltip="Limit number of historical boxes to prevent hitting TradingView's 500 object limit", group="Display")
 dark_mode = input.bool(true, "Dark Mode", tooltip="Toggle between light and dark monochrome theme", group="Display")
 enable_session_filter = input.bool(true, title="Enable Session Filter", tooltip="Disable for 24/7 markets like crypto", group="Session")
 
@@ -14,17 +15,19 @@ afternoon_sess = input.session("1200-1600", title="Afternoon Session", group="Se
 
 // Monochrome color scheme like ORB strategy
 line_color = dark_mode ? color.white : color.black
-box_border_color = dark_mode ? color.new(color.white, 50) : color.new(color.black, 50)
+box_border_color = color.new(color.white, 100)  // Transparent border
 morning_color = dark_mode ? color.new(color.white, 85) : color.new(color.black, 85)
-afternoon_color = dark_mode ? color.new(color.white, 80) : color.new(color.black, 80)
+afternoon_color_normal = dark_mode ? color.new(color.white, 80) : color.new(color.black, 80)
+afternoon_color_warning = color.new(color.yellow, 70)  // Yellow for low continuation probability
 label_bg_color = dark_mode ? color.white : color.black
 label_text_color = dark_mode ? color.black : color.white
 
 // Multisession logic (adapted from ORB strategy)
+is_weekday = dayofweek != dayofweek.saturday and dayofweek != dayofweek.sunday
 session_time_am = enable_session_filter ? time(timeframe.period, morning_sess + ":1234567") : time(timeframe.period)
 session_time_pm = enable_session_filter ? time(timeframe.period, afternoon_sess + ":1234567") : time(timeframe.period)
-in_morning = enable_session_filter ? not na(session_time_am) : true
-in_afternoon = enable_session_filter ? not na(session_time_pm) : true
+in_morning = enable_session_filter ? (not na(session_time_am) and is_weekday) : (not na(time(timeframe.period, morning_sess + ":1234567")) and is_weekday)
+in_afternoon = enable_session_filter ? (not na(session_time_pm) and is_weekday) : (not na(time(timeframe.period, afternoon_sess + ":1234567")) and is_weekday)
 
 // Variables to track session ranges
 var float morning_high = na
@@ -85,16 +88,20 @@ if session_ended
     array.push(historical_afternoon_ranges, afternoon_range)
     array.push(historical_results, afternoon_greater)
     
-    // Limit arrays to last 50 sessions
+    // Limit arrays to last sessions with proper box cleanup
     if array.size(historical_morning_ranges) > 50
         array.shift(historical_morning_ranges)
         array.shift(historical_afternoon_ranges)
         array.shift(historical_results)
-        if array.size(historical_morning_boxes) > 50
-            old_box = array.shift(historical_morning_boxes)
+    
+    // Limit historical boxes separately to prevent hitting 500 object limit
+    if array.size(historical_morning_boxes) > max_boxes
+        old_box = array.shift(historical_morning_boxes)
+        if not na(old_box)
             box.delete(old_box)
-        if array.size(historical_afternoon_boxes) > 50
-            old_box = array.shift(historical_afternoon_boxes)
+    if array.size(historical_afternoon_boxes) > max_boxes
+        old_box = array.shift(historical_afternoon_boxes)
+        if not na(old_box)
             box.delete(old_box)
     
     // Reset current boxes for next session
@@ -107,21 +114,29 @@ if show_ranges
     if is_new_morning
         if not na(morning_box)
             box.delete(morning_box)
-        morning_box := box.new(bar_index, morning_high, bar_index + 1, morning_low, border_color=box_border_color, bgcolor=morning_color, border_width=1, extend=extend.none)
+        morning_box := box.new(bar_index, morning_high, bar_index + 1, morning_low, border_color=box_border_color, bgcolor=morning_color, border_width=0, extend=extend.none)
     else if in_morning and not na(morning_box)
         box.set_right(morning_box, bar_index)
         box.set_top(morning_box, morning_high)
         box.set_bottom(morning_box, morning_low)
     
-    // Afternoon range box
+    // Afternoon range box with dynamic color based on continuation probability
     if is_new_afternoon
         if not na(afternoon_box)
             box.delete(afternoon_box)
-        afternoon_box := box.new(bar_index, afternoon_high, bar_index + 1, afternoon_low, border_color=box_border_color, bgcolor=afternoon_color, border_width=1, extend=extend.none)
+        // Use yellow color if afternoon range indicates low continuation probability
+        afternoon_color = afternoon_greater ? afternoon_color_warning : afternoon_color_normal
+        afternoon_box := box.new(bar_index, afternoon_high, bar_index + 1, afternoon_low, border_color=box_border_color, bgcolor=afternoon_color, border_width=0, extend=extend.none)
     else if in_afternoon and not na(afternoon_box)
         box.set_right(afternoon_box, bar_index)
         box.set_top(afternoon_box, afternoon_high)
         box.set_bottom(afternoon_box, afternoon_low)
+        // Update color dynamically as afternoon session progresses
+        current_afternoon_range = afternoon_high - afternoon_low
+        current_morning_range = not na(morning_high) and not na(morning_low) ? morning_high - morning_low : 0
+        is_low_continuation = current_afternoon_range > current_morning_range
+        afternoon_color = is_low_continuation ? afternoon_color_warning : afternoon_color_normal
+        box.set_bgcolor(afternoon_box, afternoon_color)
     
     // Stop extending boxes when sessions end
     if in_morning[1] and not in_morning and not na(morning_box)
@@ -142,15 +157,15 @@ if show_ranges and barstate.islast
     if not na(afternoon_box) and not na(current_afternoon_range)
         label.new(box.get_right(afternoon_box), (afternoon_high + afternoon_low) / 2, text=str.tostring(current_afternoon_range, "#.##"), style=label.style_label_left, color=label_bg_color, textcolor=label_text_color, size=size.small)
 
-// Visual signal when session ends
-if show_ranges and session_ended and afternoon_greater
-    signal_color = dark_mode ? color.red : color.maroon
-    label.new(bar_index, low - (low * 0.01), text="Low Continuation", color=signal_color, textcolor=color.white, size=size.tiny, style=label.style_label_up)
-
 // Plot range comparison for backtesting  
 plot(afternoon_greater ? 1 : 0, title="Afternoon > Morning", display=display.data_window, color=color.red)
 plot(morning_range, title="Morning Range", display=display.data_window, color=line_color)
 plot(afternoon_range, title="Afternoon Range", display=display.data_window, color=line_color)
+
+// Debug plots to check session detection
+plot(in_morning ? 1 : 0, title="In Morning Session", display=display.data_window, color=color.blue)
+plot(in_afternoon ? 1 : 0, title="In Afternoon Session", display=display.data_window, color=color.orange)
+plot(is_weekday ? 1 : 0, title="Is Weekday", display=display.data_window, color=color.green)
 
 // Compact dashboard
 if show_dashboard and barstate.islast
