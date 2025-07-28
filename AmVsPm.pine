@@ -1,0 +1,229 @@
+//@version=6
+indicator("AM vs PM Range Analysis", shorttitle="AMvsPM", overlay=true)
+
+// Input parameters
+show_ranges = input.bool(true, "Show Range Boxes", group="Display")
+show_dashboard = input.bool(true, "Show Dashboard", group="Display")
+show_full_backtest = input.bool(false, "Show Full 50-Day Backtest Data", group="Display")
+dark_mode = input.bool(true, "Dark Mode", tooltip="Toggle between light and dark monochrome theme", group="Display")
+enable_session_filter = input.bool(true, title="Enable Session Filter", tooltip="Disable for 24/7 markets like crypto", group="Session")
+
+// Session definitions using input.session like ORB
+morning_sess = input.session("0930-1200", title="Morning Session", group="Session")
+afternoon_sess = input.session("1200-1600", title="Afternoon Session", group="Session")
+
+// Monochrome color scheme like ORB strategy
+line_color = dark_mode ? color.white : color.black
+box_border_color = dark_mode ? color.new(color.white, 50) : color.new(color.black, 50)
+morning_color = dark_mode ? color.new(color.white, 85) : color.new(color.black, 85)
+afternoon_color = dark_mode ? color.new(color.white, 80) : color.new(color.black, 80)
+label_bg_color = dark_mode ? color.white : color.black
+label_text_color = dark_mode ? color.black : color.white
+
+// Multisession logic (adapted from ORB strategy)
+session_time_am = enable_session_filter ? time(timeframe.period, morning_sess + ":1234567") : time(timeframe.period)
+session_time_pm = enable_session_filter ? time(timeframe.period, afternoon_sess + ":1234567") : time(timeframe.period)
+in_morning = enable_session_filter ? not na(session_time_am) : true
+in_afternoon = enable_session_filter ? not na(session_time_pm) : true
+
+// Variables to track session ranges
+var float morning_high = na
+var float morning_low = na
+var float afternoon_high = na
+var float afternoon_low = na
+var float morning_range = na
+var float afternoon_range = na
+var bool afternoon_greater = false
+
+// Historical tracking arrays and persistent boxes
+var array<float> historical_morning_ranges = array.new<float>()
+var array<float> historical_afternoon_ranges = array.new<float>()
+var array<bool> historical_results = array.new<bool>()
+var array<box> historical_morning_boxes = array.new<box>()
+var array<box> historical_afternoon_boxes = array.new<box>()
+
+var box morning_box = na
+var box afternoon_box = na
+
+// Session detection logic
+is_new_morning = in_morning and not in_morning[1]
+is_new_afternoon = in_afternoon and not in_afternoon[1]
+session_ended = in_afternoon[1] and not in_afternoon
+
+// Track morning session
+if is_new_morning
+    morning_high := high
+    morning_low := low
+else if in_morning
+    morning_high := math.max(morning_high, high)
+    morning_low := math.min(morning_low, low)
+
+// Track afternoon session  
+if is_new_afternoon
+    afternoon_high := high
+    afternoon_low := low
+else if in_afternoon
+    afternoon_high := math.max(afternoon_high, high)
+    afternoon_low := math.min(afternoon_low, low)
+
+// Calculate ranges and store results when session ends
+if session_ended
+    morning_range := morning_high - morning_low
+    afternoon_range := afternoon_high - afternoon_low
+    afternoon_greater := afternoon_range > morning_range
+    
+    // Make current boxes persistent before storing
+    if not na(morning_box)
+        box.set_extend(morning_box, extend.none)
+        array.push(historical_morning_boxes, morning_box)
+    if not na(afternoon_box)
+        box.set_extend(afternoon_box, extend.none)
+        array.push(historical_afternoon_boxes, afternoon_box)
+    
+    // Store historical data
+    array.push(historical_morning_ranges, morning_range)
+    array.push(historical_afternoon_ranges, afternoon_range)
+    array.push(historical_results, afternoon_greater)
+    
+    // Limit arrays to last 50 sessions
+    if array.size(historical_morning_ranges) > 50
+        array.shift(historical_morning_ranges)
+        array.shift(historical_afternoon_ranges)
+        array.shift(historical_results)
+        if array.size(historical_morning_boxes) > 50
+            old_box = array.shift(historical_morning_boxes)
+            box.delete(old_box)
+        if array.size(historical_afternoon_boxes) > 50
+            old_box = array.shift(historical_afternoon_boxes)
+            box.delete(old_box)
+    
+    // Reset current boxes for next session
+    morning_box := na
+    afternoon_box := na
+
+// Drawing functions
+if show_ranges
+    // Morning range box
+    if is_new_morning
+        if not na(morning_box)
+            box.delete(morning_box)
+        morning_box := box.new(bar_index, morning_high, bar_index + 1, morning_low, border_color=box_border_color, bgcolor=morning_color, border_width=1, extend=extend.none)
+    else if in_morning and not na(morning_box)
+        box.set_right(morning_box, bar_index)
+        box.set_top(morning_box, morning_high)
+        box.set_bottom(morning_box, morning_low)
+    
+    // Afternoon range box
+    if is_new_afternoon
+        if not na(afternoon_box)
+            box.delete(afternoon_box)
+        afternoon_box := box.new(bar_index, afternoon_high, bar_index + 1, afternoon_low, border_color=box_border_color, bgcolor=afternoon_color, border_width=1, extend=extend.none)
+    else if in_afternoon and not na(afternoon_box)
+        box.set_right(afternoon_box, bar_index)
+        box.set_top(afternoon_box, afternoon_high)
+        box.set_bottom(afternoon_box, afternoon_low)
+    
+    // Stop extending boxes when sessions end
+    if in_morning[1] and not in_morning and not na(morning_box)
+        box.set_extend(morning_box, extend.none)
+        
+    if in_afternoon[1] and not in_afternoon and not na(afternoon_box)
+        box.set_extend(afternoon_box, extend.none)
+
+// Add range labels and signals
+if show_ranges and barstate.islast
+    current_morning_range = not na(morning_high) and not na(morning_low) ? morning_high - morning_low : na
+    current_afternoon_range = not na(afternoon_high) and not na(afternoon_low) ? afternoon_high - afternoon_low : na
+    
+    // Add range labels to current boxes
+    if not na(morning_box) and not na(current_morning_range)
+        label.new(box.get_right(morning_box), (morning_high + morning_low) / 2, text=str.tostring(current_morning_range, "#.##"), style=label.style_label_left, color=label_bg_color, textcolor=label_text_color, size=size.small)
+    
+    if not na(afternoon_box) and not na(current_afternoon_range)
+        label.new(box.get_right(afternoon_box), (afternoon_high + afternoon_low) / 2, text=str.tostring(current_afternoon_range, "#.##"), style=label.style_label_left, color=label_bg_color, textcolor=label_text_color, size=size.small)
+
+// Visual signal when session ends
+if show_ranges and session_ended and afternoon_greater
+    signal_color = dark_mode ? color.red : color.maroon
+    label.new(bar_index, low - (low * 0.01), text="Low Continuation", color=signal_color, textcolor=color.white, size=size.tiny, style=label.style_label_up)
+
+// Plot range comparison for backtesting  
+plot(afternoon_greater ? 1 : 0, title="Afternoon > Morning", display=display.data_window, color=color.red)
+plot(morning_range, title="Morning Range", display=display.data_window, color=line_color)
+plot(afternoon_range, title="Afternoon Range", display=display.data_window, color=line_color)
+
+// Compact dashboard
+if show_dashboard and barstate.islast
+    dashboard_size = show_full_backtest ? 15 : 3
+    table_bg = dark_mode ? color.black : color.white
+    table_border = dark_mode ? color.white : color.black
+    var table dashboard = table.new(position.bottom_right, 4, dashboard_size + 1, bgcolor=table_bg, border_width=1, border_color=table_border)
+    
+    // Calculate statistics
+    total_days = array.size(historical_results)
+    low_continuation_days = 0
+    
+    if total_days > 0
+        for i = 0 to total_days - 1
+            if array.get(historical_results, i)
+                low_continuation_days += 1
+    
+    high_continuation_pct = total_days > 0 ? ((total_days - low_continuation_days) * 100.0 / total_days) : 0.0
+    
+    if show_full_backtest and total_days > 0
+        // Full backtest table headers
+        table.cell(dashboard, 0, 0, "Day", text_color=label_text_color, bgcolor=label_bg_color, text_size=size.tiny)
+        table.cell(dashboard, 1, 0, "AM Range", text_color=label_text_color, bgcolor=label_bg_color, text_size=size.tiny)
+        table.cell(dashboard, 2, 0, "PM Range", text_color=label_text_color, bgcolor=label_bg_color, text_size=size.tiny)
+        table.cell(dashboard, 3, 0, "Result", text_color=label_text_color, bgcolor=label_bg_color, text_size=size.tiny)
+        
+        // Show last 14 days of data
+        start_index = math.max(0, total_days - 14)
+        for i = start_index to total_days - 1
+            row = i - start_index + 1
+            day_num = total_days - i
+            am_range = array.get(historical_morning_ranges, i)
+            pm_range = array.get(historical_afternoon_ranges, i)
+            result = array.get(historical_results, i)
+            result_bg = result ? color.red : color.green
+            result_text = result ? "LOW" : "HIGH"
+            
+            table.cell(dashboard, 0, row, str.tostring(day_num), text_color=line_color, text_size=size.tiny)
+            table.cell(dashboard, 1, row, str.tostring(am_range, "#.##"), text_color=line_color, text_size=size.tiny)
+            table.cell(dashboard, 2, row, str.tostring(pm_range, "#.##"), text_color=line_color, text_size=size.tiny)
+            table.cell(dashboard, 3, row, result_text, text_color=color.white, bgcolor=result_bg, text_size=size.tiny)
+        
+        // Overall statistics at bottom
+        table.cell(dashboard, 0, 15, "Overall (" + str.tostring(total_days) + " days)", text_color=label_text_color, bgcolor=label_bg_color, text_size=size.tiny)
+        table.cell(dashboard, 1, 15, "", text_color=label_text_color, bgcolor=label_bg_color, text_size=size.tiny)
+        table.cell(dashboard, 2, 15, "", text_color=label_text_color, bgcolor=label_bg_color, text_size=size.tiny)
+        table.cell(dashboard, 3, 15, str.tostring(high_continuation_pct, "#") + "%", text_color=color.white, bgcolor=high_continuation_pct >= 50 ? color.green : color.red, text_size=size.tiny)
+    else
+        // Compact dashboard
+        current_morning_range = not na(morning_high) and not na(morning_low) ? morning_high - morning_low : na
+        current_afternoon_range = not na(afternoon_high) and not na(afternoon_low) ? afternoon_high - afternoon_low : na
+        
+        // Yesterday's data
+        yesterday_result = total_days > 0 ? array.get(historical_results, total_days - 1) : false
+        yesterday_am = total_days > 0 ? str.tostring(array.get(historical_morning_ranges, total_days - 1), "#.##") : "--"
+        yesterday_pm = total_days > 0 ? str.tostring(array.get(historical_afternoon_ranges, total_days - 1), "#.##") : "--"
+        yesterday_bg = yesterday_result ? color.red : color.green
+        
+        // Today's data  
+        current_status = not na(current_morning_range) and not na(current_afternoon_range) ? (current_afternoon_range > current_morning_range ? "LOW" : "HIGH") : "PENDING"
+        current_am = not na(current_morning_range) ? str.tostring(current_morning_range, "#.##") : "--"
+        current_pm = not na(current_afternoon_range) ? str.tostring(current_afternoon_range, "#.##") : "--"
+        current_bg = current_status == "LOW" ? color.red : current_status == "HIGH" ? color.green : color.gray
+        
+        // Compact table with monochrome theme
+        table.cell(dashboard, 0, 0, "Yesterday", text_color=color.white, bgcolor=yesterday_bg, text_size=size.small)
+        table.cell(dashboard, 1, 0, yesterday_am + "/" + yesterday_pm + " " + (yesterday_result ? "LOW" : "HIGH"), text_color=color.white, bgcolor=yesterday_bg, text_size=size.small)
+        
+        table.cell(dashboard, 0, 1, "Today", text_color=color.white, bgcolor=current_bg, text_size=size.small)
+        table.cell(dashboard, 1, 1, current_am + "/" + current_pm + " " + current_status, text_color=color.white, bgcolor=current_bg, text_size=size.small)
+        
+        table.cell(dashboard, 0, 2, "Overall (" + str.tostring(total_days) + " days)", text_color=color.white, bgcolor=high_continuation_pct >= 50 ? color.green : color.red, text_size=size.small)
+        table.cell(dashboard, 1, 2, str.tostring(high_continuation_pct, "#") + "% HIGH", text_color=color.white, bgcolor=high_continuation_pct >= 50 ? color.green : color.red, text_size=size.small)
+
+// Alerts
+alertcondition(afternoon_greater, title="Low Continuation Probability", message="Afternoon range exceeded morning range - Low probability of trend continuation")
