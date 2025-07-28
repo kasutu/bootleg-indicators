@@ -1,7 +1,7 @@
 //@version=6
-indicator("AM vs PM Range Analysis", shorttitle="AMvsPM", overlay=true)
+indicator("AM vs PM Range Analysis | kasutufx", shorttitle="AMvsPM", overlay=true)
 
-// Input parameters
+// Input parameterss
 show_ranges = input.bool(true, "Show Range Boxes", group="Display")
 show_dashboard = input.bool(true, "Show Dashboard", group="Display")
 show_full_backtest = input.bool(false, "Show Full 50-Day Backtest Data", group="Display")
