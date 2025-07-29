@@ -62,9 +62,11 @@ var int session_start_bar = na, var int entry_bar = na
 var int max_tp_hit = 0  // Track maximum TP level reached (0=none, 1=TP1, 2=TP2, 3=TP3)
 var bool position_closed = false, var bool exit_label_placed = false
 
-// Variables to store the boxes for updating
-var box red_box = na
-var box green_box = na
+// Variables to store the boxes for updating - arrays for multiple entries
+var array<box> red_boxes = array.new<box>()
+var array<box> green_boxes = array.new<box>()
+var box current_red_box = na
+var box current_green_box = na
 
 // Track session start bar - capture it when session first starts
 if is_first
@@ -75,8 +77,8 @@ if is_first
     position_closed := false
     exit_label_placed := false
     entry_bar := na
-    red_box := na
-    green_box := na
+    current_red_box := na
+    current_green_box := na
 
 // Helper function to draw red box on breakout
 draw_breakout_box() =>
@@ -90,8 +92,16 @@ if bullish_breakout
     position_closed := false
     exit_label_placed := false
     entry_bar := bar_index
-    bg_color = color.new(color.red, 80)
-    red_box := box.new(left=entry_bar, top=orb_high, right=bar_index, bottom=orb_low, bgcolor=bg_color, border_color=color.new(color.gray, 50), border_width=1)
+    
+    // Draw red box (entry to SL range)
+    red_bg_color = color.new(color.red, 80)
+    current_red_box := box.new(left=entry_bar, top=orb_high, right=bar_index, bottom=orb_low, bgcolor=red_bg_color, border_color=color.new(color.gray, 50), border_width=1)
+    array.push(red_boxes, current_red_box)
+    
+    // Draw green box (entry to TP3 range) at the same time
+    green_bg_color = color.new(color.green, 85)
+    current_green_box := box.new(left=entry_bar, top=tp3_bull, right=bar_index, bottom=orb_high, bgcolor=green_bg_color, border_color=color.new(color.green, 60), border_width=1)
+    array.push(green_boxes, current_green_box)
     
 if bearish_breakout
     confirmed_bearish := true
@@ -100,8 +110,16 @@ if bearish_breakout
     position_closed := false
     exit_label_placed := false
     entry_bar := bar_index
-    bg_color = color.new(color.red, 80)
-    red_box := box.new(left=entry_bar, top=orb_high, right=bar_index, bottom=orb_low, bgcolor=bg_color, border_color=color.new(color.gray, 50), border_width=1)
+    
+    // Draw red box (entry to SL range)
+    red_bg_color = color.new(color.red, 80)
+    current_red_box := box.new(left=entry_bar, top=orb_high, right=bar_index, bottom=orb_low, bgcolor=red_bg_color, border_color=color.new(color.gray, 50), border_width=1)
+    array.push(red_boxes, current_red_box)
+    
+    // Draw green box (entry to TP3 range) at the same time
+    green_bg_color = color.new(color.green, 85)
+    current_green_box := box.new(left=entry_bar, top=orb_low, right=bar_index, bottom=tp3_bear, bgcolor=green_bg_color, border_color=color.new(color.green, 60), border_width=1)
+    array.push(green_boxes, current_green_box)
 
 // Track TP hits and stop loss for both directions
 if confirmed_bullish and not position_closed
@@ -113,8 +131,6 @@ if confirmed_bullish and not position_closed
         max_tp_hit := 1
     if close <= orb_low
         position_closed := true
-        // Stop red box extension immediately when stop loss hit
-        // (no need to update right edge here, it will be frozen)
 
 if confirmed_bearish and not position_closed
     if close <= tp3_bear and max_tp_hit < 3
@@ -125,44 +141,27 @@ if confirmed_bearish and not position_closed
         max_tp_hit := 1
     if close >= orb_high
         position_closed := true
-        // Stop red box extension immediately when stop loss hit
-        // (no need to update right edge here, it will be frozen)
 
-// Draw green TP box when any TP level is hit
-if (confirmed_bullish or confirmed_bearish) and max_tp_hit > 0 and na(green_box)
-    // Get the highest TP level reached
-    tp_level = confirmed_bullish ? (max_tp_hit == 1 ? tp1_bull : max_tp_hit == 2 ? tp2_bull : tp3_bull) : (max_tp_hit == 1 ? tp1_bear : max_tp_hit == 2 ? tp2_bear : tp3_bear)
-    
-    bg_color = color.new(color.green, 90)
-    top_level = confirmed_bullish ? tp_level : orb_low
-    bottom_level = confirmed_bullish ? orb_high : tp_level
-    green_box := box.new(left=entry_bar, top=top_level, right=bar_index, bottom=bottom_level, bgcolor=bg_color, border_color=color.new(color.green, 60), border_width=2)
-    
-    // Stop red box extension at the same bar when any TP is hit
-    if not na(red_box)
-        box.set_right(red_box, bar_index)
-    
-    // Close position only when TP3 is reached
-    if max_tp_hit >= 3
-        position_closed := true
-
-// Update green box level when higher TP is hit (but don't extend it)
-if not na(green_box) and max_tp_hit > 0
+// Update green box levels based on TP progress
+if not na(current_green_box) and max_tp_hit > 0
     tp_level = confirmed_bullish ? (max_tp_hit == 1 ? tp1_bull : max_tp_hit == 2 ? tp2_bull : tp3_bull) : (max_tp_hit == 1 ? tp1_bear : max_tp_hit == 2 ? tp2_bear : tp3_bear)
     top_level = confirmed_bullish ? tp_level : orb_low
     bottom_level = confirmed_bullish ? orb_high : tp_level
-    box.set_top(green_box, top_level)
-    box.set_bottom(green_box, bottom_level)
-    // Update right edge only when higher TP is hit
-    if max_tp_hit > max_tp_hit[1]
-        box.set_right(green_box, bar_index)
-        // Also update red box to match green box right edge
-        if not na(red_box)
-            box.set_right(red_box, bar_index)
+    box.set_top(current_green_box, top_level)
+    box.set_bottom(current_green_box, bottom_level)
 
-// Continuously update red box only if no TP hit and no SL hit
-if not na(red_box) and not position_closed and na(green_box)
-    box.set_right(red_box, bar_index)
+// Stop extending boxes when position closes or TP3 reached
+if position_closed or max_tp_hit >= 3
+    if not na(current_red_box)
+        box.set_right(current_red_box, bar_index)
+    if not na(current_green_box)
+        box.set_right(current_green_box, bar_index)
+else
+    // Continue extending both boxes while position is active
+    if not na(current_red_box)
+        box.set_right(current_red_box, bar_index)
+    if not na(current_green_box)
+        box.set_right(current_green_box, bar_index)
 
 // Plot ORB levels with historical retention
 plot(hide and not na(orb_high) ? orb_high : na, style=plot.style_line, color=orb_high[1] != orb_high ? na : line_color, title="ORB High", linewidth=1)
