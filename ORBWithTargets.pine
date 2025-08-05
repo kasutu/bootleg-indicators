@@ -61,6 +61,7 @@ var bool confirmed_bullish = false, var bool confirmed_bearish = false
 var int session_start_bar = na, var int entry_bar = na
 var int max_tp_hit = 0  // Track maximum TP level reached (0=none, 1=TP1, 2=TP2, 3=TP3)
 var bool position_closed = false, var bool exit_label_placed = false
+var bool sl_hit = false  // Track if stop loss was hit
 
 // Variables to store the boxes for updating - arrays for multiple entries
 var array<box> red_boxes = array.new<box>()
@@ -76,6 +77,7 @@ if is_first
     max_tp_hit := 0
     position_closed := false
     exit_label_placed := false
+    sl_hit := false
     entry_bar := na
     current_red_box := na
     current_green_box := na
@@ -91,6 +93,7 @@ if bullish_breakout
     max_tp_hit := 0
     position_closed := false
     exit_label_placed := false
+    sl_hit := false
     entry_bar := bar_index
     
     // Draw red box (entry to SL range)
@@ -109,6 +112,7 @@ if bearish_breakout
     max_tp_hit := 0
     position_closed := false
     exit_label_placed := false
+    sl_hit := false
     entry_bar := bar_index
     
     // Draw red box (entry to SL range)
@@ -131,6 +135,7 @@ if confirmed_bullish and not position_closed
         max_tp_hit := 1
     if close <= orb_low
         position_closed := true
+        sl_hit := true
 
 if confirmed_bearish and not position_closed
     if close <= tp3_bear and max_tp_hit < 3
@@ -141,26 +146,32 @@ if confirmed_bearish and not position_closed
         max_tp_hit := 1
     if close >= orb_high
         position_closed := true
+        sl_hit := true
 
-// Update green box levels based on TP progress
-if not na(current_green_box) and max_tp_hit > 0
+// Update green box levels based on TP progress - don't draw green box if SL was hit
+if not na(current_green_box) and max_tp_hit > 0 and not sl_hit
     tp_level = confirmed_bullish ? (max_tp_hit == 1 ? tp1_bull : max_tp_hit == 2 ? tp2_bull : tp3_bull) : (max_tp_hit == 1 ? tp1_bear : max_tp_hit == 2 ? tp2_bear : tp3_bear)
     top_level = confirmed_bullish ? tp_level : orb_low
     bottom_level = confirmed_bullish ? orb_high : tp_level
     box.set_top(current_green_box, top_level)
     box.set_bottom(current_green_box, bottom_level)
 
+// Hide green box if position is closed due to SL hit
+if not na(current_green_box) and sl_hit
+    box.delete(current_green_box)
+    current_green_box := na
+
 // Stop extending boxes when position closes or TP3 reached
 if position_closed or max_tp_hit >= 3
     if not na(current_red_box)
         box.set_right(current_red_box, bar_index)
-    if not na(current_green_box)
+    if not na(current_green_box) and not sl_hit
         box.set_right(current_green_box, bar_index)
 else
     // Continue extending both boxes while position is active
     if not na(current_red_box)
         box.set_right(current_red_box, bar_index)
-    if not na(current_green_box)
+    if not na(current_green_box) and not sl_hit
         box.set_right(current_green_box, bar_index)
 
 // Plot ORB levels with historical retention
