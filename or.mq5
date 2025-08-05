@@ -37,6 +37,7 @@ datetime last_reset_time = 0;
 datetime last_bar_time = 0; // Track last processed bar time
 
 // TP levels variables
+input double profit_multiplier = 10.0; // Multiplier for TP3 level (ORB range)
 double tp3_bull = 0;
 double tp3_bear = 0;
 bool position_active = false;
@@ -297,8 +298,8 @@ void CalculateORB()
 
   // Calculate TP3 level only (6x ORB range)
   double orb_range = orb_high - orb_low;
-  tp3_bull = orb_high + orb_range * 6;
-  tp3_bear = orb_low - orb_range * 6;
+  tp3_bull = orb_high + orb_range * profit_multiplier; // 8x ORB range for bullish TP3
+  tp3_bear = orb_low - orb_range * profit_multiplier;
 
   Print("ORB: ", orb_high, " - ", orb_low, " | TP3: ", tp3_bull, " / ", tp3_bear);
 
