@@ -719,12 +719,12 @@ void MoveStopLossToProfit()
         if (is_long_position)
         {
           // For longs: SL = entry + (0.5 * risk)
-          new_sl_price = entry_price + (initial_risk_price * 0.2);
+          new_sl_price = entry_price + (initial_risk_price * 0.1);
         }
         else
         {
           // For shorts: SL = entry - (0.5 * risk)
-          new_sl_price = entry_price - (initial_risk_price * 0.2);
+          new_sl_price = entry_price - (initial_risk_price * 0.1);
         }
 
         MqlTradeRequest request = {};
