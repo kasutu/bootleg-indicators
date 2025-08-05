@@ -40,6 +40,7 @@ bool is_long_position = false;
 
 // TP progression tracking
 bool tp3_reached = false;
+bool breakeven_applied = false; // Track if SL has been moved to break even
 ulong current_position_ticket = 0;
 double entry_price = 0.0;
 double position_volume = 0.0;
@@ -203,7 +204,7 @@ void ResetDailyVariables()
 {
   DeleteChartObjects();
 
-  orb_calculated = trading_window_active = tp3_reached = position_active = is_long_position = breakout_triggered = false;
+  orb_calculated = trading_window_active = tp3_reached = position_active = is_long_position = breakout_triggered = breakeven_applied = false;
   current_position_ticket = 0;
   orb_high = orb_low = tp3_bull = tp3_bear = entry_price = position_volume = current_bar_close = 0.0;
   last_bar_time = 0;
@@ -642,6 +643,26 @@ double CalculatePnLUSD(double close_price)
 }
 
 //+------------------------------------------------------------------+
+//| Calculate risk in USD between two price levels                   |
+//+------------------------------------------------------------------+
+double CalculateRiskUSD(double entry_price_param, double sl_price)
+{
+  if (entry_price_param == 0 || sl_price == 0)
+    return 0;
+
+  double price_diff = MathAbs(entry_price_param - sl_price);
+
+  // Convert to USD using the same method as P&L calculation
+  double contract_size = SymbolInfoDouble(Symbol(), SYMBOL_TRADE_CONTRACT_SIZE);
+  double tick_value = SymbolInfoDouble(Symbol(), SYMBOL_TRADE_TICK_VALUE);
+  double tick_size = SymbolInfoDouble(Symbol(), SYMBOL_TRADE_TICK_SIZE);
+
+  double risk_usd = (price_diff / tick_size) * tick_value * position_volume;
+
+  return risk_usd;
+}
+
+//+------------------------------------------------------------------+
 //| Helper function to handle TP3 reached event                     |
 //+------------------------------------------------------------------+
 void HandleTP3Reached(bool is_long, double current_price, double tp3_level)
@@ -658,6 +679,55 @@ void HandleTP3Reached(bool is_long, double current_price, double tp3_level)
   RemoveTP3Line();
 
   Print("Position closed at TP3 - Profit: $", DoubleToString(pnl_usd, 2));
+}
+
+//+------------------------------------------------------------------+
+//| Move stop loss to break even (triggered when P&L = 2x risk)     |
+//+------------------------------------------------------------------+
+void MoveStopLossToBreakEven()
+{
+  if (!position_active || current_position_ticket == 0 || breakeven_applied)
+    return;
+
+  // Find the position by magic number
+  for (int i = 0; i < PositionsTotal(); i++)
+  {
+    if (PositionGetTicket(i) > 0)
+    {
+      if (PositionGetInteger(POSITION_MAGIC) == magic_number)
+      {
+        MqlTradeRequest request = {};
+        MqlTradeResult result = {};
+
+        // Set up the modification request
+        request.action = TRADE_ACTION_SLTP;
+        request.symbol = PositionGetString(POSITION_SYMBOL);
+        request.position = PositionGetTicket(i);
+        request.sl = entry_price;                    // Move SL to entry price (break even)
+        request.tp = PositionGetDouble(POSITION_TP); // Keep current TP
+
+        // Send the modification request
+        if (OrderSend(request, result))
+        {
+          if (result.retcode == TRADE_RETCODE_DONE)
+          {
+            breakeven_applied = true;
+            string direction = is_long_position ? "Long" : "Short";
+            Print("SUCCESS: SL moved to break even for ", direction, " position. Entry: ", entry_price);
+          }
+          else
+          {
+            Print("ERROR: Failed to move SL to break even. Return code: ", result.retcode);
+          }
+        }
+        else
+        {
+          Print("ERROR: OrderSend failed when moving SL to break even. Error: ", GetLastError());
+        }
+        break;
+      }
+    }
+  }
 }
 
 //+------------------------------------------------------------------+
@@ -686,12 +756,14 @@ void CheckPositionStatus()
   // If position no longer exists, it was closed (likely by SL or TP)
   if (!position_exists)
   {
+    string direction = is_long_position ? "Long" : "Short";
     Print("Position closed: ", direction, " (SL hit)");
 
     // Reset all position tracking variables
     position_active = false;
     is_long_position = false;
     tp3_reached = false;
+    breakeven_applied = false;
     current_position_ticket = 0;
     entry_price = 0.0;
     position_volume = 0.0;
@@ -705,7 +777,7 @@ void CheckPositionStatus()
 }
 
 //+------------------------------------------------------------------+
-//| Check for TP3 and close position                                |
+//| Check for TP3 and break-even conditions                         |
 //+------------------------------------------------------------------+
 void CheckTP3()
 {
@@ -714,6 +786,48 @@ void CheckTP3()
 
   double current_price = SymbolInfoDouble(Symbol(), SYMBOL_LAST);
 
+  // Check for break-even condition first (when current P&L reaches 2x the initial risk)
+  // Risk = distance from entry to stop loss in USD
+  // Trigger break-even when current profit = 2x initial risk
+  if (!breakeven_applied && position_active)
+  {
+    // Get current price for P&L calculation
+    double current_pnl = CalculatePnLUSD(current_price);
+
+    // Calculate initial risk (entry to SL distance in USD)
+    double initial_risk = 0;
+
+    // Get the current stop loss from the position
+    double current_sl = 0;
+    for (int i = 0; i < PositionsTotal(); i++)
+    {
+      if (PositionGetTicket(i) > 0)
+      {
+        if (PositionGetInteger(POSITION_MAGIC) == magic_number)
+        {
+          current_sl = PositionGetDouble(POSITION_SL);
+          break;
+        }
+      }
+    }
+
+    if (current_sl > 0)
+    {
+      // Calculate initial risk in USD
+      initial_risk = CalculateRiskUSD(entry_price, current_sl);
+
+      // Check if current profit is >= 2x the initial risk
+      if (current_pnl >= (initial_risk * 2.0))
+      {
+        string direction = is_long_position ? "Long" : "Short";
+        Print("Break-even trigger: ", direction, " P&L: $", DoubleToString(current_pnl, 2),
+              " >= 2x Risk: $", DoubleToString(initial_risk * 2.0, 2));
+        MoveStopLossToBreakEven();
+      }
+    }
+  }
+
+  // Check for TP3 reached
   if (is_long_position && current_price >= tp3_bull)
   {
     HandleTP3Reached(true, current_price, tp3_bull);
@@ -976,6 +1090,7 @@ void CloseAllPositions()
     position_active = false;
     is_long_position = false;
     tp3_reached = false;
+    breakeven_applied = false;
     current_position_ticket = 0;
     entry_price = 0.0;
     position_volume = 0.0;
