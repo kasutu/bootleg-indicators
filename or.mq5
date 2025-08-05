@@ -18,20 +18,19 @@ input double min_lot_size = 0.01;
 input int magic_number = 12345;
 input double volume_multiplier = 1.5;
 input ENUM_SL_METHOD sl_method = SL_ORB_HALF_RANGE; // Stop Loss calculation method
-input double sl_tolerance_pips = 3.0;               // Additional pip tolerance for SL
+input double sl_tolerance_price = 0.0003;           // Additional price tolerance for SL (in price units)
 
 //--- global variables
 double orb_high = 0;
 double orb_low = 0;
-double avg_volume = 0; // Changed from start_volume to avg_volume
 bool orb_calculated = false;
 bool trading_window_active = false;
-bool traded_today = false;
 bool breakout_triggered = false; // Prevent multiple trades on same breakout
 double current_bar_close = 0.0;  // Track current completed bar close for breakout confirmation
-int trades_today = 0;            // Count trades taken today
 datetime last_reset_time = 0;
 datetime last_bar_time = 0; // Track last processed bar time
+
+input double breakout_buffer_price = 0.0002; // Buffer price beyond ORB level for execution
 
 // TP levels variables
 double tp3_bull = 0;
@@ -58,9 +57,15 @@ string session_end_line = "Session_End";
 //+------------------------------------------------------------------+
 datetime GetNYTime()
 {
-  // EST is UTC-5, EDT is UTC-4 (adjust based on daylight saving)
-  // For simplicity, using EST offset. In production, implement proper DST logic
-  return TimeCurrent() - 5 * 3600;
+  // Get GMT time first
+  datetime gmt_time = TimeGMT();
+
+  // NY is UTC-5 (EST) or UTC-4 (EDT during daylight saving time)
+  // For simplicity, using EST offset (UTC-5).
+  // In production, implement proper DST logic based on dates
+  datetime ny_time = gmt_time - 5 * 3600; // EST: GMT - 5 hours
+
+  return ny_time;
 }
 
 //+------------------------------------------------------------------+
@@ -86,6 +91,22 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
+  // Candle close detection - only process on new candle formation
+  static datetime lastTime = 0;
+  bool new_candle = false;
+
+  if (iTime(Symbol(), PERIOD_M5, 0) != lastTime)
+  {
+    lastTime = iTime(Symbol(), PERIOD_M5, 0);
+    new_candle = true;
+
+    // Get the close price of the last completed candle
+    double currentClosePrice = iClose(Symbol(), PERIOD_M5, 1);
+    current_bar_close = currentClosePrice;
+
+    Print("New M5 candle: ", currentClosePrice);
+  }
+
   // Get NY time
   datetime ny_time = GetNYTime();
   MqlDateTime ny_struct;
@@ -103,6 +124,19 @@ void OnTick()
     {
       ResetDailyVariables();
       last_reset_time = current_date;
+    }
+  }
+
+  // Also reset variables at start of new trading day (5:00 AM NY) if not already reset
+  if (ny_hour == 5 && ny_min == 0)
+  {
+    datetime current_date = (ny_time / 86400) * 86400; // Get date component only
+
+    if (last_reset_time != current_date)
+    {
+      ResetDailyVariables();
+      last_reset_time = current_date;
+      Print("Daily reset at session start");
     }
   }
 
@@ -131,13 +165,13 @@ void OnTick()
     ObjectDelete(0, session_end_line);
   }
 
-  // Trading window: at session start (5am NY)
-  trading_window_active = (ny_hour == 5 && ny_min >= 15) || (ny_hour > 5 && ny_hour < 9);
+  // Trading window: 15 minutes after session start (5:20 AM NY)
+  trading_window_active = (ny_hour == 5 && ny_min >= 20) || (ny_hour > 5 && ny_hour < 9);
 
-  // Check for breakout during trading window - use bar-based logic
-  if (trading_window_active && orb_calculated && !position_active)
+  // Check for breakout during trading window - on candle close
+  if (trading_window_active && orb_calculated && !position_active && new_candle)
   {
-    CheckBreakoutBarBased();
+    CheckCandleCloseBreakout(); // Check for breakout on candle close
   }
   else if (trading_window_active && orb_calculated && position_active)
   {
@@ -152,6 +186,7 @@ void OnTick()
   if (position_active)
   {
     CheckTP3();
+    CheckPositionStatus(); // Check if position was closed by SL or other reasons
   }
 
   // Close positions at 5:00 PM NY (market close)
@@ -168,13 +203,12 @@ void ResetDailyVariables()
 {
   DeleteChartObjects();
 
-  orb_calculated = trading_window_active = traded_today = tp3_reached = position_active = is_long_position = breakout_triggered = false;
-  trades_today = 0;
+  orb_calculated = trading_window_active = tp3_reached = position_active = is_long_position = breakout_triggered = false;
   current_position_ticket = 0;
-  orb_high = orb_low = avg_volume = tp3_bull = tp3_bear = entry_price = position_volume = current_bar_close = 0.0;
+  orb_high = orb_low = tp3_bull = tp3_bear = entry_price = position_volume = current_bar_close = 0.0;
   last_bar_time = 0;
 
-  Print("Daily ORB variables reset at market close (5:00 PM NY)");
+  Print("Daily reset at market close");
 }
 
 //+------------------------------------------------------------------+
@@ -182,12 +216,37 @@ void ResetDailyVariables()
 //+------------------------------------------------------------------+
 void CalculateORB()
 {
-  // Get 15-minute range from 5:00-5:15 AM NY (3 bars on M5 timeframe)
-  datetime start_time = TimeCurrent() - 15 * 60; // 15 minutes ago
+  // Get current GMT time and calculate NY time
+  datetime gmt_time = TimeGMT();
+  datetime ny_time = GetNYTime();
 
-  int bars = Bars(Symbol(), PERIOD_M5, start_time, TimeCurrent());
-  if (bars < 3) // Need at least 3 bars for 15-minute range on M5
+  MqlDateTime ny_struct;
+  TimeToStruct(ny_time, ny_struct);
+
+  // Calculate 5:00 AM NY time for today
+  ny_struct.hour = 5;
+  ny_struct.min = 0;
+  ny_struct.sec = 0;
+  datetime ny_session_start = StructToTime(ny_struct);
+
+  // Calculate 5:20 AM NY time for today
+  ny_struct.min = 20;
+  datetime ny_session_end = StructToTime(ny_struct);
+
+  // Convert NY times to GMT for data retrieval
+  datetime gmt_session_start = ny_session_start + 5 * 3600; // Add 5 hours to get GMT
+  datetime gmt_session_end = ny_session_end + 5 * 3600;     // Add 5 hours to get GMT
+
+  Print("Calculating ORB for NY time: ", TimeToString(ny_session_start, TIME_DATE | TIME_MINUTES), " to ", TimeToString(ny_session_end, TIME_DATE | TIME_MINUTES));
+  Print("GMT equivalent: ", TimeToString(gmt_session_start, TIME_DATE | TIME_MINUTES), " to ", TimeToString(gmt_session_end, TIME_DATE | TIME_MINUTES));
+
+  // Get bars from the specific 20-minute ORB period using GMT times
+  int bars = Bars(Symbol(), PERIOD_M5, gmt_session_start, gmt_session_end);
+  if (bars < 4) // Need at least 4 bars for 20-minute range on M5
+  {
+    Print("Not enough bars for ORB calculation: ", bars, " bars found");
     return;
+  }
 
   double high_prices[];
   double low_prices[];
@@ -197,11 +256,11 @@ void CalculateORB()
   ArrayResize(low_prices, bars);
   ArrayResize(volumes, bars);
 
-  if (CopyHigh(Symbol(), PERIOD_M5, start_time, bars, high_prices) <= 0 ||
-      CopyLow(Symbol(), PERIOD_M5, start_time, bars, low_prices) <= 0 ||
-      CopyTickVolume(Symbol(), PERIOD_M5, start_time, bars, volumes) <= 0)
+  if (CopyHigh(Symbol(), PERIOD_M5, gmt_session_start, bars, high_prices) <= 0 ||
+      CopyLow(Symbol(), PERIOD_M5, gmt_session_start, bars, low_prices) <= 0 ||
+      CopyTickVolume(Symbol(), PERIOD_M5, gmt_session_start, bars, volumes) <= 0)
   {
-    Print("Error copying price/volume data");
+    Print("Error copying price/volume data for ORB period");
     return;
   }
 
@@ -210,35 +269,12 @@ void CalculateORB()
 
   orb_calculated = true;
 
-  // Calculate average volume like Pine Script: ta.sma(volume, 20)
-  // Get the last 20 bars for SMA calculation (completed bars only) - on M5 timeframe
-  long avg_volumes[];
-  int avg_bars = 20;
-  ArrayResize(avg_volumes, avg_bars);
-
-  if (CopyTickVolume(Symbol(), PERIOD_M5, 1, avg_bars, avg_volumes) > 0) // Start from bar 1 (previous completed bar)
-  {
-    long total_volume = 0;
-    for (int i = 0; i < avg_bars; i++)
-    {
-      total_volume += avg_volumes[i];
-    }
-    avg_volume = (double)total_volume / avg_bars;
-  }
-  else
-  {
-    Print("Error copying average volume data");
-    return;
-  }
-
   // Calculate TP3 level only (6x ORB range)
   double orb_range = orb_high - orb_low;
   tp3_bull = orb_high + orb_range * 6;
   tp3_bear = orb_low - orb_range * 6;
 
-  datetime ny_time = GetNYTime();
-  Print("ORB calculated (NY: ", TimeToString(ny_time, TIME_DATE | TIME_MINUTES), ") - High: ", orb_high, " Low: ", orb_low, " Avg Volume: ", avg_volume);
-  Print("TP3 Levels - Bull TP3: ", tp3_bull, " Bear TP3: ", tp3_bear);
+  Print("ORB: ", orb_high, " - ", orb_low, " | TP3: ", tp3_bull, " / ", tp3_bear);
 
   // Draw only the ORB lines initially
   DrawORBLines();
@@ -289,8 +325,7 @@ void DrawORBLines()
 {
   CreateHorizontalLine(orb_high_line, orb_high, clrRed, STYLE_SOLID, "ORB High: ");
   CreateHorizontalLine(orb_low_line, orb_low, clrRed, STYLE_SOLID, "ORB Low: ");
-  ChartRedraw(0);
-  Print("ORB lines drawn on chart");
+  Print("ORB lines drawn");
 }
 
 //+------------------------------------------------------------------+
@@ -303,8 +338,7 @@ void DrawSessionStartLine()
 
   // Create a new session start line
   CreateVerticalLine(session_start_line, clrBlue, STYLE_SOLID, "ORB Session Start (5:00 AM NY)");
-  ChartRedraw(0);
-  Print("Session start line drawn at 5:00 AM NY");
+  Print("Session start line drawn");
 }
 
 //+------------------------------------------------------------------+
@@ -313,8 +347,7 @@ void DrawSessionStartLine()
 void DrawSessionEndLine()
 {
   CreateVerticalLine(session_end_line, clrBlue, STYLE_DASH, "Session End (5:00 PM NY)");
-  ChartRedraw(0);
-  Print("Session end line drawn at 5:00 PM NY");
+  Print("Session end line drawn");
 }
 
 //+------------------------------------------------------------------+
@@ -328,9 +361,7 @@ void DrawTP3LineForPosition(bool is_long)
   string label_prefix = is_long ? "Bull TP3: " : "Bear TP3: ";
   string direction = is_long ? "Bullish" : "Bearish";
 
-  CreateHorizontalLine(line_name, price_level, line_color, STYLE_DASH, label_prefix);
-  Print(direction, " TP3 line drawn on chart");
-  ChartRedraw(0);
+  Print(direction, " TP3 line drawn");
 }
 
 //+------------------------------------------------------------------+
@@ -340,25 +371,21 @@ void RemoveTP3Line()
 {
   ObjectDelete(0, tp3_bull_line);
   ObjectDelete(0, tp3_bear_line);
-  ChartRedraw(0);
-  Print("TP3 line removed from chart");
+  Print("TP3 line removed");
 }
 
 //+------------------------------------------------------------------+
-//| Calculate simple stop loss using half ORB range with tolerance  |
+//| Calculate simple stop loss at midpoint between ORB high and low |
 //+------------------------------------------------------------------+
 double CalculateSimpleSL(bool is_long, double entry_price_param)
 {
   double sl = 0;
-  double point = SymbolInfoDouble(Symbol(), SYMBOL_POINT);
-  double pip_value = point * 10; // Assuming 5-digit broker
 
-  // Calculate half the ORB range
-  double orb_range = orb_high - orb_low;
-  double half_range = orb_range / 2.0;
+  // Calculate the exact midpoint price between ORB high and low
+  double midpoint_price = (orb_high + orb_low) / 2.0;
 
-  // Add pip tolerance
-  double tolerance = sl_tolerance_pips * pip_value;
+  // Add price tolerance directly
+  double tolerance = sl_tolerance_price;
 
   switch (sl_method)
   {
@@ -366,20 +393,20 @@ double CalculateSimpleSL(bool is_long, double entry_price_param)
   {
     if (is_long)
     {
-      // For longs: SL at entry minus half ORB range minus tolerance
-      sl = entry_price_param - half_range - tolerance;
+      // For longs: SL at midpoint minus tolerance
+      sl = midpoint_price - tolerance;
     }
     else
     {
-      // For shorts: SL at entry plus half ORB range plus tolerance
-      sl = entry_price_param + half_range + tolerance;
+      // For shorts: SL at midpoint plus tolerance
+      sl = midpoint_price + tolerance;
     }
   }
   break;
 
   default:
     // Fallback to same logic
-    sl = is_long ? entry_price_param - half_range - tolerance : entry_price_param + half_range + tolerance;
+    sl = is_long ? midpoint_price - tolerance : midpoint_price + tolerance;
     break;
   }
 
@@ -394,85 +421,195 @@ void ExecuteBreakoutTrade(bool is_bullish, double current_price, double level)
   string direction = is_bullish ? "BULLISH" : "BEARISH";
   string level_name = is_bullish ? "ORB High" : "ORB Low";
 
-  Print(direction, " BREAKOUT detected at price: ", current_price, " (", level_name, ": ", level, ")");
+  Print(direction, " breakout at ", current_price);
 
   if (is_bullish)
     OpenLongPosition();
   else
     OpenShortPosition();
-
-  trades_today++;
-  Print("Trade #", trades_today, " taken today");
-
-  // Set traded_today flag to prevent multiple trades on same breakout
-  traded_today = true;
 }
 
 //+------------------------------------------------------------------+
-//| Check if completed candle closed above ORB High or below ORB Low with volume |
+//| Calculate current 20-period volume SMA                          |
 //+------------------------------------------------------------------+
-void CheckBreakoutBarBased()
+double CalculateCurrentVolumeAverage()
 {
-  // Prevent multiple trades on same breakout
+  // Calculate average volume like Pine Script: ta.sma(volume, 20)
+  // Get the last 20 completed bars for SMA calculation - on M5 timeframe
+  long avg_volumes[];
+  int avg_bars = 20;
+  ArrayResize(avg_volumes, avg_bars);
+
+  // Get exactly 20 completed bars starting from bar 1 (most recent completed bar)
+  int copied = CopyTickVolume(Symbol(), PERIOD_M5, 1, avg_bars, avg_volumes);
+
+  if (copied != avg_bars)
+  {
+    Print("Warning: Only copied ", copied, " bars instead of ", avg_bars, " for volume SMA");
+    if (copied <= 0)
+    {
+      Print("Error copying volume data for SMA calculation");
+      return 0.0;
+    }
+    // Adjust avg_bars to actual copied bars
+    avg_bars = copied;
+  }
+
+  // Calculate simple moving average of the 20 bars
+  long total_volume = 0;
+  for (int i = 0; i < avg_bars; i++)
+  {
+    total_volume += avg_volumes[i];
+  }
+
+  double current_avg_volume = (double)total_volume / (double)avg_bars;
+
+  // Debug output every 20th calculation to monitor the rolling average
+  static int debug_counter = 0;
+  debug_counter++;
+  if (debug_counter % 20 == 0)
+  {
+    Print("Volume SMA: ", (long)current_avg_volume);
+  }
+
+  return current_avg_volume;
+}
+
+//+------------------------------------------------------------------+
+//| Check for breakout based on candle close prices                 |
+//+------------------------------------------------------------------+
+void CheckCandleCloseBreakout()
+{
+  // Don't proceed if breakout already triggered
   if (breakout_triggered)
     return;
 
-  // Get the most recent completed M5 bar data
-  double close_prices[];
+  // Use the close price of the last completed candle
+  double candle_close = current_bar_close;
+
+  // Calculate buffer levels (direct price buffer beyond ORB levels)
+  double buffer = breakout_buffer_price;
+
+  double bull_trigger_level = orb_high + buffer;
+  double bear_trigger_level = orb_low - buffer;
+
+  // Check for candle close breakout above ORB High + buffer
+  if (candle_close > bull_trigger_level)
+  {
+    Print("BULL breakout: ", candle_close, " > ", bull_trigger_level);
+
+    // Check volume and execute if confirmed
+    CheckVolumeAndExecute(true, candle_close);
+  }
+  // Check for candle close breakout below ORB Low - buffer
+  else if (candle_close < bear_trigger_level)
+  {
+    Print("BEAR breakout: ", candle_close, " < ", bear_trigger_level);
+
+    // Check volume and execute if confirmed
+    CheckVolumeAndExecute(false, candle_close);
+  }
+}
+
+//+------------------------------------------------------------------+
+//| Check for real-time breakout and execute immediately            |
+//+------------------------------------------------------------------+
+void CheckRealtimeBreakout()
+{
+  // Don't proceed if breakout already triggered
+  if (breakout_triggered)
+    return;
+
+  // Get current prices
+  double current_bid = SymbolInfoDouble(Symbol(), SYMBOL_BID);
+  double current_ask = SymbolInfoDouble(Symbol(), SYMBOL_ASK);
+
+  // Calculate buffer levels (direct price buffer beyond ORB levels)
+  double buffer = breakout_buffer_price;
+
+  double bull_trigger_level = orb_high + buffer;
+  double bear_trigger_level = orb_low - buffer;
+
+  // Check for real-time breakout above ORB High + buffer
+  if (current_bid > bull_trigger_level)
+  {
+    datetime ny_time = GetNYTime();
+    Print("BULLISH BREAKOUT detected (NY: ", TimeToString(ny_time, TIME_DATE | TIME_MINUTES), "): Price ", current_bid, " broke above trigger level: ", bull_trigger_level);
+
+    // Check volume and execute if confirmed
+    CheckVolumeAndExecute(true, current_bid);
+  }
+  // Check for real-time breakout below ORB Low - buffer
+  else if (current_ask < bear_trigger_level)
+  {
+    datetime ny_time = GetNYTime();
+    Print("BEARISH BREAKOUT detected (NY: ", TimeToString(ny_time, TIME_DATE | TIME_MINUTES), "): Price ", current_ask, " broke below trigger level: ", bear_trigger_level);
+
+    // Check volume and execute if confirmed
+    CheckVolumeAndExecute(false, current_ask);
+  }
+}
+
+//+------------------------------------------------------------------+
+//| Check volume and execute trade immediately                      |
+//+------------------------------------------------------------------+
+void CheckVolumeAndExecute(bool is_long_trade, double trigger_price)
+{
+  // Get the most recent completed M5 bar for volume confirmation
   long volumes[];
   datetime times[];
-
-  ArrayResize(close_prices, 1);
   ArrayResize(volumes, 1);
   ArrayResize(times, 1);
 
-  // Get the last completed bar (index 1 = most recent completed bar)
-  if (CopyClose(Symbol(), PERIOD_M5, 1, 1, close_prices) <= 0 ||
-      CopyTickVolume(Symbol(), PERIOD_M5, 1, 1, volumes) <= 0 ||
+  // Get the last completed bar for volume confirmation
+  if (CopyTickVolume(Symbol(), PERIOD_M5, 1, 1, volumes) <= 0 ||
       CopyTime(Symbol(), PERIOD_M5, 1, 1, times) <= 0)
+  {
+    Print("Error getting volume data - trade cancelled");
     return;
+  }
 
-  // Check if we have a new completed bar
-  if (times[0] <= last_bar_time)
-    return; // No new bar yet
+  // Calculate current 20-period volume average
+  double current_avg_volume = CalculateCurrentVolumeAverage();
+  if (current_avg_volume <= 0)
+  {
+    Print("Error calculating volume average - trade cancelled");
+    return;
+  }
 
-  // Update bar tracking - use current completed bar
-  last_bar_time = times[0];
-  current_bar_close = close_prices[0]; // Current completed bar close
-
-  // Volume confirmation using current completed bar
+  // Check if current volume meets the required threshold
   long current_volume = volumes[0];
-  bool volume_confirmed = (current_volume > avg_volume * volume_multiplier);
+  bool volume_confirmed = (current_volume > current_avg_volume);
 
   if (!volume_confirmed)
   {
-    // Uncomment for debugging: Print("Volume not confirmed. Current: ", current_volume, " Required: ", (long)(avg_volume * volume_multiplier));
+    Print("volume not enough: ", current_volume, " | Required Volume: ", current_avg_volume);
     return;
   }
 
-  // Print volume confirmation for debugging with NY time
-  datetime ny_time = GetNYTime();
-  Print("Volume CONFIRMED! (NY: ", TimeToString(ny_time, TIME_DATE|TIME_MINUTES), ") Candle closed at: ", current_bar_close, " | Volume: ", current_volume, " vs Required: ", (long)(avg_volume * volume_multiplier));
+  Print("Volume OK: ", current_volume, " | Executing trade");
+  breakout_triggered = true;
 
-  // Check if completed candle closed above/below ORB levels
-  bool bullish_breakout = (current_bar_close > orb_high) && volume_confirmed;
-  bool bearish_breakout = (current_bar_close < orb_low) && volume_confirmed;
+  if (is_long_trade)
+  {
+    Print("BULL executed at ", trigger_price);
+    ExecuteBreakoutTrade(true, trigger_price, orb_high);
+  }
+  else
+  {
+    Print("BEAR executed at ", trigger_price);
+    ExecuteBreakoutTrade(false, trigger_price, orb_low);
+  }
+}
 
-  // Execute trades based on completed candle breakouts
-  if (bullish_breakout)
-  {
-    breakout_triggered = true;
-    datetime ny_time = GetNYTime();
-    Print("BULLISH BREAKOUT (NY: ", TimeToString(ny_time, TIME_DATE|TIME_MINUTES), "): Candle closed at ", current_bar_close, " above ORB High: ", orb_high);
-    ExecuteBreakoutTrade(true, current_bar_close, orb_high);
-  }
-  else if (bearish_breakout)
-  {
-    breakout_triggered = true;
-    datetime ny_time = GetNYTime();
-    Print("BEARISH BREAKOUT (NY: ", TimeToString(ny_time, TIME_DATE|TIME_MINUTES), "): Candle closed at ", current_bar_close, " below ORB Low: ", orb_low);
-    ExecuteBreakoutTrade(false, current_bar_close, orb_low);
-  }
+//+------------------------------------------------------------------+
+//| Legacy function - no longer used with real-time execution      |
+//+------------------------------------------------------------------+
+void CheckBreakoutBarBased()
+{
+  // This function is no longer used - trades execute immediately in CheckRealtimeBreakout()
+  // Keeping for potential future use or debugging
+  return;
 }
 
 //+------------------------------------------------------------------+
@@ -513,16 +650,58 @@ void HandleTP3Reached(bool is_long, double current_price, double tp3_level)
   double pnl_usd = CalculatePnLUSD(current_price);
   string direction = is_long ? "Long" : "Short";
 
-  Print("TP3 REACHED for ", direction, " position at price: ", current_price, " (TP3: ", tp3_level, ")");
-  Print("Position P&L: $", DoubleToString(pnl_usd, 2), " USD");
+  Print("TP3 reached: ", direction, " P&L: $", DoubleToString(pnl_usd, 2));
 
   CloseAllPositions();
   position_active = false;
-  traded_today = false;       // Allow new trades after TP3 is reached
   breakout_triggered = false; // Allow new breakouts after TP3
   RemoveTP3Line();
 
-  Print("Position closed at TP3 - Trade completed successfully with profit: $", DoubleToString(pnl_usd, 2));
+  Print("Position closed at TP3 - Profit: $", DoubleToString(pnl_usd, 2));
+}
+
+//+------------------------------------------------------------------+
+//| Check if position still exists (SL hit detection)               |
+//+------------------------------------------------------------------+
+void CheckPositionStatus()
+{
+  if (!position_active || current_position_ticket == 0)
+    return;
+
+  // Check if our position still exists
+  bool position_exists = false;
+
+  for (int i = 0; i < PositionsTotal(); i++)
+  {
+    if (PositionGetTicket(i) > 0)
+    {
+      if (PositionGetInteger(POSITION_MAGIC) == magic_number)
+      {
+        position_exists = true;
+        break;
+      }
+    }
+  }
+
+  // If position no longer exists, it was closed (likely by SL or TP)
+  if (!position_exists)
+  {
+    Print("Position closed: ", direction, " (SL hit)");
+
+    // Reset all position tracking variables
+    position_active = false;
+    is_long_position = false;
+    tp3_reached = false;
+    current_position_ticket = 0;
+    entry_price = 0.0;
+    position_volume = 0.0;
+    breakout_triggered = false; // Allow new trades
+
+    // Remove TP3 line
+    RemoveTP3Line();
+
+    Print("EA reset - ready for new trades");
+  }
 }
 
 //+------------------------------------------------------------------+
@@ -554,7 +733,7 @@ void LogSLDetails(bool is_long, double entry_price_param, double sl)
   double orb_range = orb_high - orb_low;
   Print("=== ", direction, " POSITION OPENED ===");
   Print("Entry: ", entry_price_param, " | SL: ", sl, " | TP3: ", is_long ? tp3_bull : tp3_bear);
-  Print("ORB Range: ", DoubleToString(orb_range, 5), " | Half Range + Tolerance: ", DoubleToString((orb_range / 2.0) + (sl_tolerance_pips * SymbolInfoDouble(Symbol(), SYMBOL_POINT) * 10), 5));
+  Print("ORB Range: ", DoubleToString(orb_range, 5), " | Half Range + Tolerance: ", DoubleToString((orb_range / 2.0) + sl_tolerance_price, 5));
 }
 
 //+------------------------------------------------------------------+
@@ -572,7 +751,7 @@ double CalculateLotSize()
   double lot_step = SymbolInfoDouble(Symbol(), SYMBOL_VOLUME_STEP);
   lot_size = MathRound(lot_size / lot_step) * lot_step;
 
-  Print("Account Balance: $", account_balance, " | Calculated Lot Size: ", lot_size);
+  Print("Balance: $", account_balance, " | Lot: ", lot_size);
   return lot_size;
 }
 
@@ -627,20 +806,14 @@ void OpenPosition(bool is_long)
   // Set TP3 as take profit
   request.tp = is_long ? tp3_bull : tp3_bear;
 
-  Print("Attempting to open ", (is_long ? "LONG" : "SHORT"), " position:");
-  Print("Entry Price: ", request.price);
-  Print("Stop Loss: ", request.sl);
-  Print("Take Profit: ", request.tp);
-  Print("Volume: ", request.volume);
+  Print("Opening ", (is_long ? "LONG" : "SHORT"), " | Entry: ", request.price, " | SL: ", request.sl, " | TP: ", request.tp);
 
   // Send the order
   if (OrderSend(request, result))
   {
     if (result.retcode == TRADE_RETCODE_DONE)
     {
-      Print("SUCCESS: ", (is_long ? "LONG" : "SHORT"), " position opened!");
-      Print("Order ticket: ", result.order);
-      Print("Deal ticket: ", result.deal);
+      Print("SUCCESS: ", (is_long ? "LONG" : "SHORT"), " opened | Ticket: ", result.deal);
 
       // Update position tracking
       position_active = true;
@@ -652,7 +825,7 @@ void OpenPosition(bool is_long)
       // Draw TP3 line for the position direction
       DrawTP3LineForPosition(is_long);
 
-      Print("Position tracking updated - EA monitoring position");
+      Print("Position tracking updated");
     }
     else
     {
@@ -739,40 +912,6 @@ string GetRetcodeDescription(uint retcode)
 }
 
 //+------------------------------------------------------------------+
-//| Calculate Kelly Criterion Lot Size                              |
-//+------------------------------------------------------------------+
-double CalculateKellyLotSize(bool is_long)
-{
-  // Simplified Kelly calculation
-  // In practice, you'd need historical win rate and avg win/loss data
-  double win_rate = 0.55; // 55% win rate assumption
-  double avg_win = 2.0;   // Average win ratio
-  double avg_loss = 1.0;  // Average loss ratio
-
-  double kelly_percent = (win_rate * avg_win - (1 - win_rate) * avg_loss) / avg_win;
-  kelly_percent = MathMax(0.01, MathMin(0.1, kelly_percent)); // Cap between 1% and 10%
-
-  double account_balance = AccountInfoDouble(ACCOUNT_BALANCE);
-  double orb_range = orb_high - orb_low;
-  double risk_amount = account_balance * kelly_percent;
-
-  double lot_value = SymbolInfoDouble(Symbol(), SYMBOL_TRADE_CONTRACT_SIZE);
-  double pip_value = SymbolInfoDouble(Symbol(), SYMBOL_TRADE_TICK_VALUE);
-
-  double risk_pips = orb_range / SymbolInfoDouble(Symbol(), SYMBOL_POINT);
-  double lot_size = risk_amount / (risk_pips * pip_value);
-
-  // Ensure minimum lot size
-  lot_size = MathMax(min_lot_size, lot_size);
-
-  // Round to valid lot size
-  double lot_step = SymbolInfoDouble(Symbol(), SYMBOL_VOLUME_STEP);
-  lot_size = MathRound(lot_size / lot_step) * lot_step;
-
-  return lot_size;
-}
-
-//+------------------------------------------------------------------+
 //| Close all positions                                              |
 //+------------------------------------------------------------------+
 void CloseAllPositions()
@@ -821,8 +960,7 @@ void CloseAllPositions()
 
   if (positions_closed > 0)
   {
-    Print("ORB positions closed at 5:00 PM NY: ", positions_closed, " positions");
-    Print("Total P&L: $", DoubleToString(total_pnl, 2), " USD");
+    Print("Positions closed: ", positions_closed, " | Total P&L: $", DoubleToString(total_pnl, 2));
 
     if (total_pnl > 0)
       Print("PROFIT: Made $", DoubleToString(total_pnl, 2), " USD");
@@ -843,7 +981,6 @@ void CloseAllPositions()
     position_volume = 0.0;
 
     // Allow trading again after position is closed (reset flags)
-    traded_today = false;
     breakout_triggered = false;
     Print("Trading flags reset - EA can trade again after position close");
 
