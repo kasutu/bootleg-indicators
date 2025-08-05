@@ -44,7 +44,7 @@ bool is_long_position = false;
 
 // TP progression tracking
 bool tp3_reached = false;
-bool breakeven_applied = false; // Track if SL has been moved to break even
+bool safety_applied = false; // Track if SL has been moved to break even
 ulong current_position_ticket = 0;
 double entry_price = 0.0;
 double position_volume = 0.0;
@@ -224,7 +224,7 @@ void ResetDailyVariables()
 {
   DeleteChartObjects();
 
-  orb_calculated = trading_window_active = tp3_reached = position_active = is_long_position = breakout_triggered = breakeven_applied = false;
+  orb_calculated = trading_window_active = tp3_reached = position_active = is_long_position = breakout_triggered = safety_applied = false;
   current_position_ticket = 0;
   orb_high = orb_low = tp3_bull = tp3_bear = entry_price = position_volume = current_bar_close = 0.0;
   last_bar_time = 0;
@@ -692,11 +692,11 @@ void HandleTP3Reached(bool is_long, double current_price, double tp3_level)
 }
 
 //+------------------------------------------------------------------+
-//| Move stop loss to break even (triggered when P&L = 2x risk)     |
+//| Move stop loss to lock in 0.5x profit (triggered when P&L = 1.5x risk) |
 //+------------------------------------------------------------------+
-void MoveStopLossToBreakEven()
+void MoveStopLossToProfit()
 {
-  if (!position_active || current_position_ticket == 0 || breakeven_applied)
+  if (!position_active || current_position_ticket == 0 || safety_applied)
     return;
 
   // Find the position by magic number
@@ -706,6 +706,27 @@ void MoveStopLossToBreakEven()
     {
       if (PositionGetInteger(POSITION_MAGIC) == magic_number)
       {
+        // Get current stop loss to calculate initial risk
+        double current_sl = PositionGetDouble(POSITION_SL);
+        if (current_sl <= 0)
+          return;
+
+        // Calculate initial risk in price units
+        double initial_risk_price = MathAbs(entry_price - current_sl);
+
+        // Calculate new SL level that locks in 0.5x risk as profit
+        double new_sl_price = 0;
+        if (is_long_position)
+        {
+          // For longs: SL = entry + (0.5 * risk)
+          new_sl_price = entry_price + (initial_risk_price * 0.2);
+        }
+        else
+        {
+          // For shorts: SL = entry - (0.5 * risk)
+          new_sl_price = entry_price - (initial_risk_price * 0.2);
+        }
+
         MqlTradeRequest request = {};
         MqlTradeResult result = {};
 
@@ -713,7 +734,7 @@ void MoveStopLossToBreakEven()
         request.action = TRADE_ACTION_SLTP;
         request.symbol = PositionGetString(POSITION_SYMBOL);
         request.position = PositionGetTicket(i);
-        request.sl = entry_price;                    // Move SL to entry price (break even)
+        request.sl = new_sl_price;                   // Move SL to lock 0.5x profit
         request.tp = PositionGetDouble(POSITION_TP); // Keep current TP
 
         // Send the modification request
@@ -721,18 +742,20 @@ void MoveStopLossToBreakEven()
         {
           if (result.retcode == TRADE_RETCODE_DONE)
           {
-            breakeven_applied = true;
+            safety_applied = true;
             string direction = is_long_position ? "Long" : "Short";
-            Print("SUCCESS: SL moved to break even for ", direction, " position. Entry: ", entry_price);
+            double locked_profit_usd = CalculateRiskUSD(entry_price, new_sl_price);
+            Print("SUCCESS: SL moved to lock 0.5x profit for ", direction, " position.");
+            Print("New SL: ", new_sl_price, " | Locked Profit: $", DoubleToString(locked_profit_usd, 2));
           }
           else
           {
-            Print("ERROR: Failed to move SL to break even. Return code: ", result.retcode);
+            Print("ERROR: Failed to move SL to profit lock. Return code: ", result.retcode);
           }
         }
         else
         {
-          Print("ERROR: OrderSend failed when moving SL to break even. Error: ", GetLastError());
+          Print("ERROR: OrderSend failed when moving SL to profit lock. Error: ", GetLastError());
         }
         break;
       }
@@ -773,7 +796,7 @@ void CheckPositionStatus()
     position_active = false;
     is_long_position = false;
     tp3_reached = false;
-    breakeven_applied = false;
+    safety_applied = false;
     current_position_ticket = 0;
     entry_price = 0.0;
     position_volume = 0.0;
@@ -787,7 +810,7 @@ void CheckPositionStatus()
 }
 
 //+------------------------------------------------------------------+
-//| Check for TP3 and break-even conditions                         |
+//| Check for TP3 and profit lock conditions                        |
 //+------------------------------------------------------------------+
 void CheckTP3()
 {
@@ -796,10 +819,10 @@ void CheckTP3()
 
   double current_price = SymbolInfoDouble(Symbol(), SYMBOL_LAST);
 
-  // Check for break-even condition first (when current P&L reaches 2x the initial risk)
+  // Check for profit lock condition first (when current P&L reaches 1.5x the initial risk)
   // Risk = distance from entry to stop loss in USD
-  // Trigger break-even when current profit = 2x initial risk
-  if (!breakeven_applied && position_active)
+  // Trigger profit lock when current profit = 1.5x initial risk, SL moves to lock 0.5x profit
+  if (!safety_applied && position_active)
   {
     // Get current price for P&L calculation
     double current_pnl = CalculatePnLUSD(current_price);
@@ -826,13 +849,13 @@ void CheckTP3()
       // Calculate initial risk in USD
       initial_risk = CalculateRiskUSD(entry_price, current_sl);
 
-      // Check if current profit is >= 2x the initial risk
-      if (current_pnl >= (initial_risk * 2.0))
+      // Check if current profit is >= 1.5x the initial risk
+      if (current_pnl >= (initial_risk * 1.5))
       {
         string direction = is_long_position ? "Long" : "Short";
-        Print("Break-even trigger: ", direction, " P&L: $", DoubleToString(current_pnl, 2),
-              " >= 2x Risk: $", DoubleToString(initial_risk * 2.0, 2));
-        MoveStopLossToBreakEven();
+        Print("Profit lock trigger: ", direction, " P&L: $", DoubleToString(current_pnl, 2),
+              " >= 1.5x Risk: $", DoubleToString(initial_risk * 1.5, 2));
+        MoveStopLossToProfit();
       }
     }
   }
@@ -1100,7 +1123,7 @@ void CloseAllPositions()
     position_active = false;
     is_long_position = false;
     tp3_reached = false;
-    breakeven_applied = false;
+    safety_applied = false;
     current_position_ticket = 0;
     entry_price = 0.0;
     position_volume = 0.0;
