@@ -16,9 +16,15 @@ enum ENUM_SL_METHOD
 //--- input parameters
 input double min_lot_size = 0.01;
 input int magic_number = 12345;
-input double volume_multiplier = 1.5;
+input double volume_multiplier = 1.065;
 input ENUM_SL_METHOD sl_method = SL_ORB_HALF_RANGE; // Stop Loss calculation method
 input double sl_tolerance_price = 0.0003;           // Additional price tolerance for SL (in price units)
+
+// ORB Time Window Parameters
+input int orb_start_hour = 5;   // ORB Start Hour (NY Time)
+input int orb_start_minute = 0; // ORB Start Minute (NY Time)
+input int orb_end_hour = 5;     // ORB End Hour (NY Time)
+input int orb_end_minute = 30;  // ORB End Minute (NY Time)
 
 //--- global variables
 double orb_high = 0;
@@ -29,8 +35,6 @@ bool breakout_triggered = false; // Prevent multiple trades on same breakout
 double current_bar_close = 0.0;  // Track current completed bar close for breakout confirmation
 datetime last_reset_time = 0;
 datetime last_bar_time = 0; // Track last processed bar time
-
-input double breakout_buffer_price = 0.0002; // Buffer price beyond ORB level for execution
 
 // TP levels variables
 double tp3_bull = 0;
@@ -74,7 +78,22 @@ datetime GetNYTime()
 //+------------------------------------------------------------------+
 int OnInit()
 {
+  // Validate ORB time parameters
+  int start_total_minutes = orb_start_hour * 60 + orb_start_minute;
+  int end_total_minutes = orb_end_hour * 60 + orb_end_minute;
+
+  if (end_total_minutes <= start_total_minutes)
+  {
+    Print("ERROR: ORB end time must be after start time!");
+    Print("Start: ", orb_start_hour, ":", orb_start_minute, " End: ", orb_end_hour, ":", orb_end_minute);
+    return (INIT_PARAMETERS_INCORRECT);
+  }
+
+  int orb_duration_minutes = end_total_minutes - start_total_minutes;
   Print("ORB Strategy EA Initialized");
+  Print("ORB Window: ", orb_start_hour, ":", StringFormat("%02d", orb_start_minute), " to ",
+        orb_end_hour, ":", StringFormat("%02d", orb_end_minute), " NY (", orb_duration_minutes, " minutes)");
+
   return (INIT_SUCCEEDED);
 }
 
@@ -105,7 +124,7 @@ void OnTick()
     double currentClosePrice = iClose(Symbol(), PERIOD_M5, 1);
     current_bar_close = currentClosePrice;
 
-    Print("New M5 candle: ", currentClosePrice);
+    Print("New M5 candle: ", currentClosePrice, " volume: ", iVolume(Symbol(), PERIOD_M5, 1));
   }
 
   // Get NY time
@@ -128,8 +147,8 @@ void OnTick()
     }
   }
 
-  // Also reset variables at start of new trading day (5:00 AM NY) if not already reset
-  if (ny_hour == 5 && ny_min == 0)
+  // Also reset variables at start of new trading day (ORB start time) if not already reset
+  if (ny_hour == orb_start_hour && ny_min == orb_start_minute)
   {
     datetime current_date = (ny_time / 86400) * 86400; // Get date component only
 
@@ -141,14 +160,14 @@ void OnTick()
     }
   }
 
-  // Calculate ORB at 5:15 AM NY (15-minute range completion)
-  if (ny_hour == 5 && ny_min == 15 && !orb_calculated)
+  // Calculate ORB at the specified end time (when ORB range completion)
+  if (ny_hour == orb_end_hour && ny_min == orb_end_minute && !orb_calculated)
   {
     CalculateORB();
   }
 
-  // Draw session start line at 5:00 AM NY (only once per day)
-  if (ny_hour == 5 && ny_min == 0)
+  // Draw session start line at the configured ORB start time (only once per day)
+  if (ny_hour == orb_start_hour && ny_min == orb_start_minute)
   {
     DrawSessionStartLine();
   }
@@ -166,8 +185,9 @@ void OnTick()
     ObjectDelete(0, session_end_line);
   }
 
-  // Trading window: 15 minutes after session start (5:20 AM NY)
-  trading_window_active = (ny_hour == 5 && ny_min >= 20) || (ny_hour > 5 && ny_hour < 9);
+  // Trading window: starts after ORB completion
+  bool orb_window_complete = (ny_hour > orb_end_hour) || (ny_hour == orb_end_hour && ny_min >= orb_end_minute);
+  trading_window_active = orb_window_complete && (ny_hour < 9); // Trade until 9 AM NY
 
   // Check for breakout during trading window - on candle close
   if (trading_window_active && orb_calculated && !position_active && new_candle)
@@ -224,14 +244,15 @@ void CalculateORB()
   MqlDateTime ny_struct;
   TimeToStruct(ny_time, ny_struct);
 
-  // Calculate 5:00 AM NY time for today
-  ny_struct.hour = 5;
-  ny_struct.min = 0;
+  // Calculate ORB start time using input parameters
+  ny_struct.hour = orb_start_hour;
+  ny_struct.min = orb_start_minute;
   ny_struct.sec = 0;
   datetime ny_session_start = StructToTime(ny_struct);
 
-  // Calculate 5:20 AM NY time for today
-  ny_struct.min = 20;
+  // Calculate ORB end time using input parameters
+  ny_struct.hour = orb_end_hour;
+  ny_struct.min = orb_end_minute;
   datetime ny_session_end = StructToTime(ny_struct);
 
   // Convert NY times to GMT for data retrieval
@@ -241,11 +262,15 @@ void CalculateORB()
   Print("Calculating ORB for NY time: ", TimeToString(ny_session_start, TIME_DATE | TIME_MINUTES), " to ", TimeToString(ny_session_end, TIME_DATE | TIME_MINUTES));
   Print("GMT equivalent: ", TimeToString(gmt_session_start, TIME_DATE | TIME_MINUTES), " to ", TimeToString(gmt_session_end, TIME_DATE | TIME_MINUTES));
 
-  // Get bars from the specific 20-minute ORB period using GMT times
+  // Calculate expected number of bars based on time difference
+  int time_diff_minutes = (int)((gmt_session_end - gmt_session_start) / 60);
+  int expected_bars = time_diff_minutes / 5; // M5 timeframe = 5 minutes per bar
+
+  // Get bars from the specific ORB period using GMT times
   int bars = Bars(Symbol(), PERIOD_M5, gmt_session_start, gmt_session_end);
-  if (bars < 4) // Need at least 4 bars for 20-minute range on M5
+  if (bars < 1) // Need at least 1 bar for ORB calculation
   {
-    Print("Not enough bars for ORB calculation: ", bars, " bars found");
+    Print("Not enough bars for ORB calculation: ", bars, " bars found (expected: ", expected_bars, ")");
     return;
   }
 
@@ -330,15 +355,12 @@ void DrawORBLines()
 }
 
 //+------------------------------------------------------------------+
-//| Draw session start vertical line at 5:00 AM NY                  |
+//| Draw session start vertical line at configured ORB start time   |
 //+------------------------------------------------------------------+
 void DrawSessionStartLine()
 {
-  // delete the old session start line if it exists
-  ObjectDelete(0, session_start_line);
-
-  // Create a new session start line
-  CreateVerticalLine(session_start_line, clrBlue, STYLE_SOLID, "ORB Session Start (5:00 AM NY)");
+  CreateVerticalLine(session_start_line, clrBlue, STYLE_SOLID,
+                     StringFormat("ORB Session Start (%02d:%02d NY)", orb_start_hour, orb_start_minute));
   Print("Session start line drawn");
 }
 
@@ -488,24 +510,18 @@ void CheckCandleCloseBreakout()
   // Use the close price of the last completed candle
   double candle_close = current_bar_close;
 
-  // Calculate buffer levels (direct price buffer beyond ORB levels)
-  double buffer = breakout_buffer_price;
-
-  double bull_trigger_level = orb_high + buffer;
-  double bear_trigger_level = orb_low - buffer;
-
-  // Check for candle close breakout above ORB High + buffer
-  if (candle_close > bull_trigger_level)
+  // Check for candle close breakout above ORB High
+  if (candle_close > orb_high)
   {
-    Print("BULL breakout: ", candle_close, " > ", bull_trigger_level);
+    Print("BULL breakout: ", candle_close, " > ", orb_high);
 
     // Check volume and execute if confirmed
     CheckVolumeAndExecute(true, candle_close);
   }
-  // Check for candle close breakout below ORB Low - buffer
-  else if (candle_close < bear_trigger_level)
+  // Check for candle close breakout below ORB Low
+  else if (candle_close < orb_low)
   {
-    Print("BEAR breakout: ", candle_close, " < ", bear_trigger_level);
+    Print("BEAR breakout: ", candle_close, " < ", orb_low);
 
     // Check volume and execute if confirmed
     CheckVolumeAndExecute(false, candle_close);
@@ -525,26 +541,20 @@ void CheckRealtimeBreakout()
   double current_bid = SymbolInfoDouble(Symbol(), SYMBOL_BID);
   double current_ask = SymbolInfoDouble(Symbol(), SYMBOL_ASK);
 
-  // Calculate buffer levels (direct price buffer beyond ORB levels)
-  double buffer = breakout_buffer_price;
-
-  double bull_trigger_level = orb_high + buffer;
-  double bear_trigger_level = orb_low - buffer;
-
-  // Check for real-time breakout above ORB High + buffer
-  if (current_bid > bull_trigger_level)
+  // Check for real-time breakout above ORB High
+  if (current_bid > orb_high)
   {
     datetime ny_time = GetNYTime();
-    Print("BULLISH BREAKOUT detected (NY: ", TimeToString(ny_time, TIME_DATE | TIME_MINUTES), "): Price ", current_bid, " broke above trigger level: ", bull_trigger_level);
+    Print("BULLISH BREAKOUT detected (NY: ", TimeToString(ny_time, TIME_DATE | TIME_MINUTES), "): Price ", current_bid, " broke above trigger level: ", orb_high);
 
     // Check volume and execute if confirmed
     CheckVolumeAndExecute(true, current_bid);
   }
-  // Check for real-time breakout below ORB Low - buffer
-  else if (current_ask < bear_trigger_level)
+  // Check for real-time breakout below ORB Low
+  else if (current_ask < orb_low)
   {
     datetime ny_time = GetNYTime();
-    Print("BEARISH BREAKOUT detected (NY: ", TimeToString(ny_time, TIME_DATE | TIME_MINUTES), "): Price ", current_ask, " broke below trigger level: ", bear_trigger_level);
+    Print("BEARISH BREAKOUT detected (NY: ", TimeToString(ny_time, TIME_DATE | TIME_MINUTES), "): Price ", current_ask, " broke below trigger level: ", orb_low);
 
     // Check volume and execute if confirmed
     CheckVolumeAndExecute(false, current_ask);
@@ -580,11 +590,11 @@ void CheckVolumeAndExecute(bool is_long_trade, double trigger_price)
 
   // Check if current volume meets the required threshold
   long current_volume = volumes[0];
-  bool volume_confirmed = (current_volume > current_avg_volume);
+  bool volume_confirmed = (current_volume > current_avg_volume * volume_multiplier);
 
   if (!volume_confirmed)
   {
-    Print("volume not enough: ", current_volume, " | Required Volume: ", current_avg_volume);
+    Print("volume not enough: ", current_volume, " | Required Volume: ", current_avg_volume * volume_multiplier);
     return;
   }
 
