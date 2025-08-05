@@ -21,10 +21,11 @@ input ENUM_SL_METHOD sl_method = SL_ORB_HALF_RANGE; // Stop Loss calculation met
 input double sl_tolerance_price = 0.0003;           // Additional price tolerance for SL (in price units)
 
 // ORB Time Window Parameters
-input int orb_start_hour = 5;   // ORB Start Hour (NY Time)
-input int orb_start_minute = 0; // ORB Start Minute (NY Time)
-input int orb_end_hour = 5;     // ORB End Hour (NY Time)
-input int orb_end_minute = 30;  // ORB End Minute (NY Time)
+input int orb_start_hour = 5;          // ORB Start Hour (NY Time)
+input int orb_start_minute = 0;        // ORB Start Minute (NY Time)
+input int orb_end_hour = 5;            // ORB End Hour (NY Time)
+input int orb_end_minute = 30;         // ORB End Minute (NY Time)
+input int trade_window_limit_hour = 9; // Trade until this hour (NY Time)
 
 //--- global variables
 double orb_high = 0;
@@ -37,7 +38,7 @@ datetime last_reset_time = 0;
 datetime last_bar_time = 0; // Track last processed bar time
 
 // TP levels variables
-input double profit_multiplier = 10.0; // Multiplier for TP3 level (ORB range)
+input double profit_multiplier = 6.0; // Multiplier for TP3 level (ORB range)
 double tp3_bull = 0;
 double tp3_bear = 0;
 bool position_active = false;
@@ -188,7 +189,7 @@ void OnTick()
 
   // Trading window: starts after ORB completion
   bool orb_window_complete = (ny_hour > orb_end_hour) || (ny_hour == orb_end_hour && ny_min >= orb_end_minute);
-  trading_window_active = orb_window_complete && (ny_hour < 9); // Trade until 9 AM NY
+  trading_window_active = orb_window_complete && (ny_hour < trade_window_limit_hour); // Trade until 10 AM NY
 
   // Check for breakout during trading window - on candle close
   if (trading_window_active && orb_calculated && !position_active && new_candle)
