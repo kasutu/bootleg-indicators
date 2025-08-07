@@ -22,7 +22,7 @@ input int orb_start_hour = 5;
 input int orb_start_minute = 0;
 input int orb_end_hour = 5;
 input int orb_end_minute = 30;
-input int trade_window_limit_hour = 9;
+input int trade_window_limit_hour = 16; // Extended to 4 PM NY time
 input double profit_multiplier = 6.0;
 input bool use_ema_confirmation = true; // Use EMA crossing confirmation
 input bool use_cvd_confirmation = true; // Use CVD divergence confirmation
@@ -31,7 +31,7 @@ input bool use_cmi_filter = true;       // Use Choppy Market Index filter
 input int cmi_period = 14;              // CMI calculation period
 input double cmi_threshold = 70.0;      // CMI threshold (above = choppy market)
 input bool draw_indicators = true;      // Draw indicators on chart
-input bool draw_ema_lines = true;       // Draw EMA 50/200 lines
+input bool draw_ema_lines = false;      // Draw EMA 50/200 lines (disabled for performance)
 input bool draw_cmi_histogram = true;   // Draw CMI histogram in subwindow
 input bool draw_cvd_line = true;        // Draw CVD line in subwindow
 
@@ -90,10 +90,12 @@ private:
         CopyClose(Symbol(), PERIOD_M5, 0, bars_needed, closes) <= 0)
       return false;
 
-    // Calculate CMI for each position
+    // Calculate CMI for each position, most recent first
     for (int i = 0; i < bars_needed - cmi_period; i++)
     {
-      m_cmi_values[i] = CalculateCMIValue(highs, lows, closes, i, cmi_period);
+      // Calculate CMI using data from the end of the array (most recent)
+      int calc_start = bars_needed - cmi_period - i - 1;
+      m_cmi_values[i] = CalculateCMIValue(highs, lows, closes, calc_start, cmi_period);
     }
 
     return true;
@@ -269,15 +271,18 @@ public:
       return false;
 
     // Calculate CVD (simplified version using close vs midpoint)
+    // Note: MQL5 arrays are filled with most recent data at highest index
     double cumulative_delta = 0;
-    for (int i = 0; i < bars_needed; i++)
+    for (int i = bars_needed - 1; i >= 0; i--) // Process from oldest to newest
     {
       double midpoint = (highs[i] + lows[i]) / 2.0;
       double delta = (closes[i] > midpoint) ? (double)volumes[i] : -(double)volumes[i];
       cumulative_delta += delta;
 
-      m_cvd_values[i] = cumulative_delta;
-      m_price_values[i] = closes[i];
+      // Store with most recent at index 0
+      int store_idx = bars_needed - 1 - i;
+      m_cvd_values[store_idx] = cumulative_delta;
+      m_price_values[store_idx] = closes[i];
     }
 
     return true;
@@ -288,10 +293,11 @@ public:
     if (!UpdateCVD())
       return false;
 
-    // Look for price making lower lows while CVD makes higher lows
-    int recent_idx = cvd_lookback_periods;
+    // Use a more reasonable recent index (most recent data is at index 0)
+    int recent_idx = 0; // Most recent data
+    int lookback_start = MathMin(cvd_lookback_periods, ArraySize(m_price_values) - 1);
 
-    // Find recent low in price
+    // Find recent low in price (current/recent data)
     double recent_price_low = m_price_values[recent_idx];
     double recent_cvd_at_price_low = m_cvd_values[recent_idx];
 
@@ -299,8 +305,11 @@ public:
     double prev_price_low = recent_price_low;
     double prev_cvd_at_price_low = recent_cvd_at_price_low;
 
-    for (int i = recent_idx - cvd_lookback_periods; i < recent_idx; i++)
+    for (int i = 1; i <= lookback_start; i++) // Start from index 1 (skip current)
     {
+      if (i >= ArraySize(m_price_values))
+        break; // Safety check
+
       if (m_price_values[i] < prev_price_low)
       {
         prev_price_low = m_price_values[i];
@@ -309,8 +318,10 @@ public:
     }
 
     // Bullish divergence: price lower low, CVD higher low
-    bool divergence = (recent_price_low < prev_price_low) &&
-                      (recent_cvd_at_price_low > prev_cvd_at_price_low);
+    // Add minimum difference threshold to avoid false signals
+    bool price_made_lower_low = (recent_price_low < prev_price_low - 0.0001);
+    bool cvd_made_higher_low = (recent_cvd_at_price_low > prev_cvd_at_price_low + 100); // Minimum CVD difference
+    bool divergence = price_made_lower_low && cvd_made_higher_low;
 
     if (divergence)
       Print("CVD Bull divergence detected");
@@ -323,10 +334,11 @@ public:
     if (!UpdateCVD())
       return false;
 
-    // Look for price making higher highs while CVD makes lower highs
-    int recent_idx = cvd_lookback_periods;
+    // Use a more reasonable recent index (most recent data is at index 0)
+    int recent_idx = 0; // Most recent data
+    int lookback_start = MathMin(cvd_lookback_periods, ArraySize(m_price_values) - 1);
 
-    // Find recent high in price
+    // Find recent high in price (current/recent data)
     double recent_price_high = m_price_values[recent_idx];
     double recent_cvd_at_price_high = m_cvd_values[recent_idx];
 
@@ -334,8 +346,11 @@ public:
     double prev_price_high = recent_price_high;
     double prev_cvd_at_price_high = recent_cvd_at_price_high;
 
-    for (int i = recent_idx - cvd_lookback_periods; i < recent_idx; i++)
+    for (int i = 1; i <= lookback_start; i++) // Start from index 1 (skip current)
     {
+      if (i >= ArraySize(m_price_values))
+        break; // Safety check
+
       if (m_price_values[i] > prev_price_high)
       {
         prev_price_high = m_price_values[i];
@@ -344,8 +359,10 @@ public:
     }
 
     // Bearish divergence: price higher high, CVD lower high
-    bool divergence = (recent_price_high > prev_price_high) &&
-                      (recent_cvd_at_price_high < prev_cvd_at_price_high);
+    // Add minimum difference threshold to avoid false signals
+    bool price_made_higher_high = (recent_price_high > prev_price_high + 0.0001);
+    bool cvd_made_lower_high = (recent_cvd_at_price_high < prev_cvd_at_price_high - 100); // Minimum CVD difference
+    bool divergence = price_made_higher_high && cvd_made_lower_high;
 
     if (divergence)
       Print("CVD Bear divergence detected");
@@ -374,7 +391,13 @@ private:
 public:
   CTimeManager() : m_last_reset_time(0) {}
 
-  datetime GetNYTime() { return TimeGMT() - 5 * 3600; }
+  datetime GetNYTime()
+  {
+    datetime gmt_time = TimeGMT();
+    datetime ny_time = gmt_time - 5 * 3600; // Standard time UTC-5
+    // Note: This doesn't account for daylight saving time
+    return ny_time;
+  }
 
   bool IsORBWindow(const MqlDateTime &ny_struct)
   {
@@ -714,9 +737,26 @@ public:
     // CVD Confirmation
     if (use_cvd_confirmation)
     {
-      // Simplified CVD status for display
-      string cvd_status = "CVD: MONITORING";
-      color cvd_color = clrGray;
+      // Show CVD value and divergence status
+      double current_cvd = 0;
+      bool bull_div = false;
+      bool bear_div = false;
+
+      // Try to get CVD values without modifying const objects
+      long volumes[2];
+      double closes[2], highs[2], lows[2];
+      if (CopyTickVolume(Symbol(), PERIOD_M5, 1, 2, volumes) > 0 &&
+          CopyClose(Symbol(), PERIOD_M5, 1, 2, closes) > 0 &&
+          CopyHigh(Symbol(), PERIOD_M5, 1, 2, highs) > 0 &&
+          CopyLow(Symbol(), PERIOD_M5, 1, 2, lows) > 0)
+      {
+        // Simple CVD calculation for display
+        double midpoint = (highs[1] + lows[1]) / 2.0;
+        current_cvd = (closes[1] > midpoint) ? (double)volumes[1] : -(double)volumes[1];
+      }
+
+      string cvd_status = StringFormat("CVD: %.0f", current_cvd);
+      color cvd_color = (current_cvd > 0) ? clrLime : clrRed;
 
       CreateLabel("InfoPanel_CVD", cvd_status, 10, y_offset, cvd_color, 8);
     }
@@ -1384,26 +1424,28 @@ private:
         }
       }
 
-      // CVD confirmation
+      // CVD confirmation - only check for divergence if enabled, don't require it
       if (use_cvd_confirmation)
       {
-        bool cvd_confirmed = false;
+        bool cvd_warning = false;
         if (bull_breakout)
         {
-          cvd_confirmed = m_cvd_analyzer.IsBullishDivergence();
-          if (!cvd_confirmed)
+          // For bullish breakout, warn if there's bearish divergence (negative signal)
+          cvd_warning = m_cvd_analyzer.IsBearishDivergence();
+          if (cvd_warning)
           {
-            Print("CVD not confirmed for bull breakout");
-            return;
+            Print("Warning: CVD bearish divergence detected on bull breakout - proceed with caution");
+            // Don't block the trade, just warn
           }
         }
         else if (bear_breakout)
         {
-          cvd_confirmed = m_cvd_analyzer.IsBearishDivergence();
-          if (!cvd_confirmed)
+          // For bearish breakout, warn if there's bullish divergence (negative signal)
+          cvd_warning = m_cvd_analyzer.IsBullishDivergence();
+          if (cvd_warning)
           {
-            Print("CVD not confirmed for bear breakout");
-            return;
+            Print("Warning: CVD bullish divergence detected on bear breakout - proceed with caution");
+            // Don't block the trade, just warn
           }
         }
       }
