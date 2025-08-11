@@ -3,7 +3,7 @@ indicator("ORB + Targets [kasutufx]", overlay=true)
 
 // Inputs
 inputMax = input(15, title="ORB total time (minutes)")
-sess = input.session("0500-0520", title="Session Time") 
+sess = input.session("0600-0620", title="Session Time") 
 timezone_input = input.string("America/New_York", title="Timezone", options=["America/New_York", "America/Chicago", "America/Los_Angeles", "Europe/London", "Asia/Tokyo", "Asia/Shanghai", "Australia/Sydney"])
 volConfirm = input.bool(true, title="Require Volume Confirmation")
 volMultiplier = input.float(1.5, title="Volume Multiplier", minval=1.0, maxval=5.0)
