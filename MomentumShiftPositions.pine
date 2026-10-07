@@ -5,7 +5,7 @@
 
 //@version=6
 // Momentum Shift Positions [kasutufx]
-// Price-chart overlay (no oscillator pane), locked to the 1H chart.
+// Price-chart overlay (no oscillator pane), runs on the chart timeframe.
 //
 // Rules
 // 1. Momentum = HMA(close - close[length], smooth), computed in the background (not plotted).
@@ -13,10 +13,11 @@
 //    "Strong only" keeps signals that fire below zero (long) / above zero (short).
 // 2. Each signal projects 5 targets from the signal candle: high + n x zone (long) / low - n x zone (short),
 //    zone = SMA(high - low, 100) x Shift Zone Size.
-// 3. Entry at the close of the 1H signal candle (confirmed bars only, no repaint).
+// 3. Entry at the close of the signal candle (confirmed bars only, no repaint).
 // 4. TP on the chosen projected target (1-5). SL at the signal candle low / high plus an ATR buffer.
 // 5. SL moves to break-even at the chosen RR. Optional exit on the opposite signal (counted by result sign).
 // 6. One position at a time, optional max trades per day, stats over the lookback window.
+// 7. Two smoothed SMA200 lines for context: one on the chart timeframe, one on the 1H timeframe (closed 1H bars).
 indicator("Momentum Shift Positions [kasutufx]", shorttitle="MomShift Pos", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500, behind_chart=false)
 
 // ===== Inputs =====
@@ -37,9 +38,46 @@ lots = input.float(0.10, "Lot Size", minval=0.01, step=0.01, group="Positions")
 maxPerDay = input.int(0, "Max Trades Per Day (0 = no limit)", minval=0, group="Positions")
 lookbackWeeks = input.int(8, "Lookback (weeks)", minval=1, maxval=52, group="Positions")
 showTable = input.bool(true, "Show Info Panel", group="Positions")
+maLen = input.int(200, "SMA Length", minval=1, group="Moving Averages")
+maSrc = input.source(close, "SMA Source", group="Moving Averages")
+smoothType = input.string("SMA", "Smoothing Type", options=["None", "SMA", "EMA", "SMMA (RMA)", "WMA", "VWMA"], group="Moving Averages", tooltip="Smoothing applied on top of the SMA, as in the built-in Moving Average indicator.")
+smoothLen = input.int(14, "Smoothing Length", minval=1, group="Moving Averages")
+showMaChart = input.bool(true, "Show SMA (chart TF)", group="Moving Averages")
+showMa1H = input.bool(true, "Show SMA (1H TF)", group="Moving Averages")
+colMaChart = input.color(color.yellow, "Chart TF Color", group="Moving Averages")
+colMa1H = input.color(color.aqua, "1H TF Color", group="Moving Averages")
+
+// ===== Smoothed SMA200: chart TF and 1H TF =====
+f_smooth(src, len, t) =>
+    switch t
+        "SMA" => ta.sma(src, len)
+        "EMA" => ta.ema(src, len)
+        "SMMA (RMA)" => ta.rma(src, len)
+        "WMA" => ta.wma(src, len)
+        "VWMA" => ta.vwma(src, len)
+        => src
+f_ma() => f_smooth(ta.sma(maSrc, maLen), smoothLen, smoothType)
+maChart = f_ma()
+// closed 1H bars only (non-repainting)
+f_maPrev() =>
+    m = f_ma()
+    m[1]
+ma1H = request.security(syminfo.tickerid, "60", f_maPrev(), lookahead=barmerge.lookahead_on)
+plot(showMaChart ? maChart : na, "SMA200 (chart TF)", color=colMaChart, linewidth=2)
+plot(showMa1H ? ma1H : na, "SMA200 (1H)", color=colMa1H, linewidth=2)
+
+var label maChartLbl = na
+var label ma1HLbl = na
+if barstate.islast
+    label.delete(maChartLbl)
+    label.delete(ma1HLbl)
+    smTxt = smoothType == "None" ? "" : " " + smoothType + str.tostring(smoothLen)
+    if showMaChart and not na(maChart)
+        maChartLbl := label.new(bar_index + 2, maChart, "SMA" + str.tostring(maLen) + smTxt + " (" + timeframe.period + ")  " + str.tostring(maChart, format.mintick), color=color(na), textcolor=colMaChart, style=label.style_label_left, size=size.small)
+    if showMa1H and not na(ma1H)
+        ma1HLbl := label.new(bar_index + 2, ma1H, "SMA" + str.tostring(maLen) + smTxt + " (1H)  " + str.tostring(ma1H, format.mintick), color=color(na), textcolor=colMa1H, style=label.style_label_left, size=size.small)
 
 // ===== Signals (momentum is not plotted) =====
-is1H = timeframe.isintraday and timeframe.in_seconds() == 3600
 mom = ta.hma(close - close[length], smooth)
 rising = ta.crossover(mom, mom[2])
 falling = ta.crossunder(mom, mom[2])
@@ -104,7 +142,7 @@ var box slBox = na
 var line beLn = na
 
 startT = timenow - lookbackWeeks * 7 * 86400000
-enabled = active and is1H and time_close >= startT and barstate.isconfirmed
+enabled = active and time_close >= startT and barstate.isconfirmed
 
 dayStart = time("D")
 if na(day) or dayStart != day
@@ -170,7 +208,7 @@ if enabled and dir == 0 and not dayFull and longSig != shortSig and not na(atr) 
         // Long / Short Position tool style: green profit zone, red loss zone
         tpBox := box.new(bar_index, math.max(close, tpPx), bar_index + 1, math.min(close, tpPx), border_color=color.new(color.green, 60), bgcolor=color.new(color.green, 85))
         slBox := box.new(bar_index, math.max(close, slPx), bar_index + 1, math.min(close, slPx), border_color=color.new(color.red, 60), bgcolor=color.new(color.red, 85))
-        tip = "Signal: momentum " + (d == 1 ? "rising" : "falling") + (mom * d < 0 ? " (strong)" : "") + "\nEntry (1H close): " + str.tostring(close, format.mintick) + "\nSL: " + str.tostring(slPx, format.mintick) + "\nTP: " + str.tostring(tpPx, format.mintick) + " (T" + str.tostring(tpZone) + ")\nRR: " + str.tostring(math.abs(tpPx - close) / risk, "#.##") + "\nLots: " + str.tostring(lots)
+        tip = "Signal: momentum " + (d == 1 ? "rising" : "falling") + (mom * d < 0 ? " (strong)" : "") + "\nEntry (" + timeframe.period + " close): " + str.tostring(close, format.mintick) + "\nSL: " + str.tostring(slPx, format.mintick) + "\nTP: " + str.tostring(tpPx, format.mintick) + " (T" + str.tostring(tpZone) + ")\nRR: " + str.tostring(math.abs(tpPx - close) / risk, "#.##") + "\nLots: " + str.tostring(lots)
         label.new(bar_index, close, d == 1 ? "L" : "S", color=color.new(color.blue, 20), textcolor=color.white, style=label.style_label_right, size=size.tiny, tooltip=tip)
 
 alertcondition(evLong, "Long Entry", "Momentum Shift: LONG entry")
@@ -184,8 +222,8 @@ f_row(r, k, v, c) =>
     table.cell(tbl, 1, r, v, text_color=c, text_size=size.small, text_halign=text.align_right)
 
 if showTable and barstate.islast
-    statusTxt = not is1H ? "USE 1H CHART" : not active ? "OFF" : dayFull and dir == 0 ? "DAILY LIMIT REACHED" : dir == 1 ? "IN LONG" : dir == -1 ? "IN SHORT" : "WAITING SIGNAL"
-    statusCol = not is1H ? color.red : dir != 0 ? color.aqua : color.white
+    statusTxt = not active ? "OFF" : dayFull and dir == 0 ? "DAILY LIMIT REACHED" : dir == 1 ? "IN LONG" : dir == -1 ? "IN SHORT" : "WAITING SIGNAL"
+    statusCol = dir != 0 ? color.aqua : color.white
     decided = wins + losses
     winRate = decided > 0 ? wins * 100.0 / decided : 0.0
     wlRatio = losses > 0 ? wins * 1.0 / losses : wins * 1.0
