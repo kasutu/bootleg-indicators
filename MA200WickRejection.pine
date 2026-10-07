@@ -76,7 +76,10 @@ f_bar() => [high[1], low[1], close[1], close[2]]
 new5 = timeframe.change("5")
 new15 = timeframe.change("15")
 
-needSec = wickMode == "15m" ? 900 : 300
+// On a 15m chart, "5m or 15m" falls back to 15m wicks (5m candles are not visible there)
+chartSec = timeframe.in_seconds()
+effMode = wickMode == "5m or 15m" and chartSec > 300 and chartSec <= 900 ? "15m" : wickMode
+needSec = effMode == "15m" ? 900 : 300
 tfOk = timeframe.isintraday and timeframe.in_seconds() <= needSec
 
 f_whole(p, step, down) => step > 0 ? (down ? math.floor(p / step) * step : math.ceil(p / step) * step) : p
@@ -87,12 +90,12 @@ bear5 = new5 and pc5 < ma and h5 >= ma and c5 < ma
 bull15 = new15 and pc15 > ma and l15 <= ma and c15 > ma
 bear15 = new15 and pc15 < ma and h15 >= ma and c15 < ma
 
-longSig = switch wickMode
+longSig = switch effMode
     "5m" => bull5
     "15m" => bull15
     "5m or 15m" => bull5 or bull15
     => bull5 and bull15
-shortSig = switch wickMode
+shortSig = switch effMode
     "5m" => bear5
     "15m" => bear15
     "5m or 15m" => bear5 or bear15
@@ -133,8 +136,8 @@ enteredLong = false
 enteredShort = false
 if state == 2 and longSig != shortSig
     d = longSig ? 1 : -1
-    useBoth5 = wickMode != "15m" and (d == 1 ? bull5 : bear5)
-    useBoth15 = wickMode != "5m" and (d == 1 ? bull15 : bear15)
+    useBoth5 = effMode != "15m" and (d == 1 ? bull5 : bear5)
+    useBoth15 = effMode != "5m" and (d == 1 ? bull15 : bear15)
     ep = useBoth5 ? c5 : c15
     float rawSl = na
     if d == 1
@@ -233,7 +236,7 @@ if showTable and barstate.islast
     decided = wins + losses
     winRate = decided > 0 ? wins * 100.0 / decided : 0.0
     wlRatio = losses > 0 ? wins * 1.0 / losses : wins * 1.0
-    f_row(0, "Status [" + mode + "]", statusTxt, statusCol)
+    f_row(0, "Status [" + mode + " | " + effMode + "]", statusTxt, statusCol)
     f_row(1, (useSmooth ? "1H Smoothed MA" : "1H MA") + str.tostring(maLen), str.tostring(ma, format.mintick), useSmooth ? color.aqua : color.yellow)
     f_row(2, "PDH / PDL", str.tostring(pdh, format.mintick) + " / " + str.tostring(pdl, format.mintick), color.white)
     f_row(3, "Wins", str.tostring(wins), color.green)
