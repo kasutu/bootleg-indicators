@@ -17,10 +17,13 @@
 // MA       : iMA(_Symbol, PERIOD_H1, 200, 0, MODE_SMA, PRICE_LOW), read closed bar (shift 1) via CopyBuffer
 // Wicks    : CopyRates(_Symbol, PERIOD_M5 / PERIOD_M15, 1, 2, rates) on new bar
 // PDH/PDL  : iHigh/iLow(_Symbol, PERIOD_D1, 1)
+// MA notes : create the iMA handle once in OnInit, check BarsCalculated before CopyBuffer, IndicatorRelease in OnDeinit
 // Risk     : lossPerLot = (slDist / SYMBOL_TRADE_TICK_SIZE) * SYMBOL_TRADE_TICK_VALUE_LOSS
+//            or OrderCalcProfit(type, _Symbol, lots, entry, sl, loss) (EA/script only, already in deposit currency)
 //            Contract Size input below = SYMBOL_TRADE_CONTRACT_SIZE
-// Lots     : normalize with SYMBOL_VOLUME_MIN / SYMBOL_VOLUME_STEP / SYMBOL_VOLUME_MAX
-// BE       : CTrade.PositionModify(ticket, entryPrice, tp), respect SYMBOL_TRADE_STOPS_LEVEL
+// Lots     : normalize with SYMBOL_VOLUME_MIN / SYMBOL_VOLUME_STEP / SYMBOL_VOLUME_MAX, OrderCheck before OrderSend
+// BE       : CTrade.PositionModify(ticket, entryPrice, tp), only if price is beyond SYMBOL_TRADE_STOPS_LEVEL
+//            and SYMBOL_TRADE_FREEZE_LEVEL (points) from the current price
 indicator("MA200 Wick Rejection [kasutufx]", shorttitle="MA200 Wick", overlay=true, max_lines_count=500, max_labels_count=500)
 
 // ===== Inputs =====
