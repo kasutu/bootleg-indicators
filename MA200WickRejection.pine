@@ -32,6 +32,10 @@ active = input.bool(true, "Strategy Active (manual toggle)", group="Control")
 startTime = input.time(timestamp("2025-01-01T00:00:00"), "Active From", group="Control", tooltip="Manual mode only. Signals and stats are only counted from this date.")
 maLen = input.int(200, "MA Length", minval=1, group="Moving Average")
 maTF = input.timeframe("60", "MA Timeframe", group="Moving Average")
+smoothType = input.string("None", "Smoothing Type", options=["None", "SMA", "SMA + Bollinger Bands", "EMA", "SMMA (RMA)", "WMA", "VWMA"], group="Smoothing", tooltip="Same smoothing options as the built-in TradingView Moving Average indicator, applied to the 1H MA.")
+smoothLen = input.int(14, "Smoothing Length", minval=1, group="Smoothing")
+bbMult = input.float(2.0, "BB StdDev", minval=0.001, maxval=50, step=0.5, group="Smoothing", tooltip="Only used with SMA + Bollinger Bands.")
+signalLine = input.string("Smoothed MA", "Strategy Uses", options=["Smoothed MA", "Raw MA"], group="Smoothing", tooltip="Which line the touch and wick rules use. Falls back to the raw MA when Smoothing Type is None.")
 wickMode = input.string("5m or 15m", "Wick Confirmation", options=["5m", "15m", "5m or 15m", "5m and 15m"], group="Entry")
 balanceIn = input.float(10000, "Account Balance", minval=1, group="Risk")
 lots = input.float(0.10, "Lot Size", minval=0.01, step=0.01, group="Risk")
@@ -44,7 +48,25 @@ showTable = input.bool(true, "Show Stats Table", group="Display")
 
 // ===== Data =====
 // Closed 1H bar values only (non-repainting)
-ma = request.security(syminfo.tickerid, maTF, ta.sma(low, maLen)[1], lookahead=barmerge.lookahead_on)
+// Smoothing, as in the built-in Moving Average indicator
+f_smooth(src, len, t) =>
+    switch t
+        "SMA" => ta.sma(src, len)
+        "SMA + Bollinger Bands" => ta.sma(src, len)
+        "EMA" => ta.ema(src, len)
+        "SMMA (RMA)" => ta.rma(src, len)
+        "WMA" => ta.wma(src, len)
+        "VWMA" => ta.vwma(src, len)
+        => na
+f_maSet() =>
+    base = ta.sma(low, maLen)
+    sm = f_smooth(base, smoothLen, smoothType)
+    dev = smoothType == "SMA + Bollinger Bands" ? ta.stdev(base, smoothLen) * bbMult : na
+    [base[1], sm[1], dev[1]]
+[maRaw, maSmooth, maDev] = request.security(syminfo.tickerid, maTF, f_maSet(), lookahead=barmerge.lookahead_on)
+smoothOn = smoothType != "None"
+useSmooth = smoothOn and signalLine == "Smoothed MA"
+ma = useSmooth ? maSmooth : maRaw
 [pdh, pdl] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead=barmerge.lookahead_on)
 
 // Last closed 5m / 15m candle: [high, low, close, previous close]
@@ -193,7 +215,11 @@ if not na(exitPx)
     dir := 0
 
 // ===== Plots =====
-plot(ma, "1H SMA200 (Low)", color=color.yellow, linewidth=2)
+plot(maRaw, "1H SMA200 (Low)", color=color.yellow, linewidth=2)
+plot(smoothOn ? maSmooth : na, "Smoothed MA", color=color.aqua, linewidth=2)
+bbUp = plot(smoothOn ? maSmooth + maDev : na, "BB Upper", color=color.new(color.green, 50))
+bbLo = plot(smoothOn ? maSmooth - maDev : na, "BB Lower", color=color.new(color.green, 50))
+fill(bbUp, bbLo, color=color.new(color.green, 92), title="BB Fill")
 plot(showPD ? pdh : na, "Prev Day High", color=color.new(color.green, 60), style=plot.style_stepline)
 plot(showPD ? pdl : na, "Prev Day Low", color=color.new(color.red, 60), style=plot.style_stepline)
 bgcolor(state == 2 ? color.new(color.yellow, 92) : na, title="Armed")
@@ -215,7 +241,7 @@ if showTable and barstate.islast
     winRate = decided > 0 ? wins * 100.0 / decided : 0.0
     wlRatio = losses > 0 ? wins * 1.0 / losses : wins * 1.0
     f_row(0, "Status [" + mode + "]", statusTxt, statusCol)
-    f_row(1, "1H MA" + str.tostring(maLen), str.tostring(ma, format.mintick), color.yellow)
+    f_row(1, (useSmooth ? "1H Smoothed MA" : "1H MA") + str.tostring(maLen), str.tostring(ma, format.mintick), useSmooth ? color.aqua : color.yellow)
     f_row(2, "PDH / PDL", str.tostring(pdh, format.mintick) + " / " + str.tostring(pdl, format.mintick), color.white)
     f_row(3, "Wins", str.tostring(wins), color.green)
     f_row(4, "Losses", str.tostring(losses), color.red)
