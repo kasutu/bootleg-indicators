@@ -55,6 +55,7 @@ wholeStep = input.float(1.0, "Whole Number Step", minval=0, group="Targets", dis
 beRR = input.float(1.0, "Move SL to BE at RR", minval=0.1, step=0.1, group="Targets", display=display.none)
 showPD = input.bool(false, "Show 24h High/Low", group="Display", display=display.none)
 showTable = input.bool(true, "Show Info Panel", group="Display", display=display.none)
+showSkips = input.bool(false, "Show Skipped Signals", group="Display", display=display.none, tooltip="Marks every wick rejection that did not become a trade with a small grey x. Hover it to see why.")
 
 // ===== Constants =====
 MS3 = 180000
@@ -153,6 +154,11 @@ type Engine
     bool evShort = false
     bool evExit = false
 
+// Grey x on a wick that did not become a trade, reason in the tooltip
+f_skip(int T, float y, int d, string why) =>
+    if showSkips
+        label.new(T, y, "x", xloc=xloc.bar_time, color=color.new(color.gray, 100), textcolor=color.gray, style=d == 1 ? label.style_label_up : label.style_label_down, size=size.tiny, tooltip=(d == 1 ? "Long" : "Short") + " wick skipped: " + why)
+
 f_whole(p, step, down) => step > 0 ? (down ? math.floor(p / step) * step : math.ceil(p / step) * step) : p
 
 // A closed 5m / 15m candle: wick rejection check
@@ -178,6 +184,10 @@ f_wick(Engine e, bool is5, int t, float h, float l, float c, float m, float rh, 
         sigL := (use15 and bull) or (both and bull and e.bull5T == T)
         sigS := (use15 and bear) or (both and bear and e.bear5T == T)
     dayFull = maxPerDay > 0 and e.dayTrades >= maxPerDay
+    if sigL != sigS and (e.state != 2 or dayFull)
+        d = sigL ? 1 : -1
+        why = e.state == 3 ? "a trade is still open" : e.state == 4 ? "already waiting for a 3m entry" : e.state == 0 ? "strategy off / outside lookback" : e.state == 1 ? (e.fresh ? "not armed yet (no MA touch since activation)" : "not armed (needs a fresh MA touch after the last trade)") : "daily trade limit reached"
+        f_skip(T, d == 1 ? l : h, d, why)
     if e.state == 2 and sigL != sigS and not dayFull
         d = sigL ? 1 : -1
         e.pSl := (d == 1 ? l : h) - d * slBuffer
@@ -234,6 +244,7 @@ f_bar3(Engine e, int t, float h, float l, float c, float m, float pdhV, float pd
         // 3m close back through the wick or no room to the target -> skip and stay armed
         if rawDist <= 0 or not validTp
             e.state := 2
+            f_skip(T, c, d, rawDist <= 0 ? "3m entry candle closed beyond the wick (no room for SL)" : "no room to the 24h / prev day target")
         else
             dist = math.min(rawDist, maxDist)
             e.state := 3
