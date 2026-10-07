@@ -14,6 +14,7 @@
 // 5. 100% TP at the rolling 24h high (long) / low (short), rounded to a whole number toward entry.
 //    If entry is at the 24h extreme (no room), the previous day high/low is used instead.
 // 6. SL moves to break-even once 1R is reached.
+// 7. Optional max trades per day (trading day = the symbol's daily session).
 // Same 3m candle SL+TP touch is counted as SL (conservative).
 //
 // Engine: runs on the 3m / 5m / 15m candles inside each chart bar, so every chart timeframe
@@ -36,6 +37,7 @@ indicator("MA200 Wick Rejection [kasutufx]", shorttitle="MA200 Wick", overlay=tr
 // ===== Inputs =====
 mode = input.string("Manual", "Mode", options=["Manual", "Auto"], group="Control", display=display.none, tooltip="Manual = uses the toggle. Auto = always on, re-arms after every trade.")
 active = input.bool(true, "Strategy Active (manual toggle)", group="Control", display=display.none)
+maxPerDay = input.int(0, "Max Trades Per Day (0 = no limit)", minval=0, group="Control", display=display.none, tooltip="Counts entries per trading day (the symbol's daily session). Once reached, new setups are ignored until the next day.")
 lookbackWeeks = input.int(8, "Lookback (weeks)", minval=1, maxval=52, group="Control", display=display.none, tooltip="Signals and stats cover this many weeks back from now. Needs enough chart history: the 1H chart covers 8 weeks on every plan.")
 maLen = input.int(200, "MA Length", minval=1, group="Moving Average", display=display.none)
 maTF = input.timeframe("60", "MA Timeframe", group="Moving Average", display=display.none)
@@ -142,6 +144,8 @@ type Engine
     int wins = 0
     int losses = 0
     int bes = 0
+    int day = na
+    int dayTrades = 0
     box tpBox = na
     box slBox = na
     line beLn = na
@@ -173,7 +177,8 @@ f_wick(Engine e, bool is5, int t, float h, float l, float c, float m, float rh, 
         e.lo24 := rl
         sigL := (use15 and bull) or (both and bull and e.bull5T == T)
         sigS := (use15 and bear) or (both and bear and e.bear5T == T)
-    if e.state == 2 and sigL != sigS
+    dayFull = maxPerDay > 0 and e.dayTrades >= maxPerDay
+    if e.state == 2 and sigL != sigS and not dayFull
         d = sigL ? 1 : -1
         e.pSl := (d == 1 ? l : h) - d * slBuffer
         e.pDir := d
@@ -241,6 +246,7 @@ f_bar3(Engine e, int t, float h, float l, float c, float m, float pdhV, float pd
             e.beLn := na
             e.evLong := d == 1
             e.evShort := d == -1
+            e.dayTrades := e.dayTrades + 1
             // Long / Short Position tool style: green profit zone, red loss zone
             e.tpBox := box.new(T, math.max(c, tp0), T, math.min(c, tp0), xloc=xloc.bar_time, border_color=color.new(color.green, 60), bgcolor=color.new(color.green, 85))
             e.slBox := box.new(T, math.max(c, e.sl), T, math.min(c, e.sl), xloc=xloc.bar_time, border_color=color.new(color.red, 60), bgcolor=color.new(color.red, 85))
@@ -262,6 +268,12 @@ eng.evExit := false
 startT = timenow - lookbackWeeks * 7 * 86400000
 inLookback = time_close >= startT
 enabled = (mode == "Auto" or active) and tfOk and inLookback and not na(ma)
+
+// New trading day -> reset the daily trade count
+dayStart = time("D")
+if na(eng.day) or dayStart != eng.day
+    eng.day := dayStart
+    eng.dayTrades := 0
 
 if not enabled and eng.state != 3
     eng.state := 0
@@ -312,14 +324,15 @@ alertcondition(eng.evShort, "Short Entry", "MA200 Wick: SHORT entry")
 alertcondition(eng.evExit, "Trade Exit", "MA200 Wick: trade closed")
 
 // ===== Info panel =====
-var table tbl = table.new(position.top_right, 2, 9, bgcolor=color.new(color.black, 20), border_width=1, border_color=color.gray)
+var table tbl = table.new(position.top_right, 2, 10, bgcolor=color.new(color.black, 20), border_width=1, border_color=color.gray)
 f_row(r, k, v, c) =>
     table.cell(tbl, 0, r, k, text_color=color.white, text_size=size.small, text_halign=text.align_left)
     table.cell(tbl, 1, r, v, text_color=c, text_size=size.small, text_halign=text.align_right)
 
 if showTable and barstate.islast
     st = eng.state
-    statusTxt = not tfOk ? "USE 3m - 1H CHART" : st == 0 ? "OFF" : st == 1 ? "WAITING 1H MA TOUCH" : st == 2 ? "ARMED - WAIT WICK" : st == 4 ? "WICK - WAIT 3M CLOSE" : eng.dir == 1 ? "IN LONG" : "IN SHORT"
+    dayFull = maxPerDay > 0 and eng.dayTrades >= maxPerDay
+    statusTxt = not tfOk ? "USE 3m - 1H CHART" : st == 0 ? "OFF" : (st == 1 or st == 2) and dayFull ? "DAILY LIMIT REACHED" : st == 1 ? "WAITING 1H MA TOUCH" : st == 2 ? "ARMED - WAIT WICK" : st == 4 ? "WICK - WAIT 3M CLOSE" : eng.dir == 1 ? "IN LONG" : "IN SHORT"
     statusCol = st == 3 ? color.aqua : st == 2 or st == 4 ? color.yellow : st == 1 ? color.white : color.gray
     decided = eng.wins + eng.losses
     winRate = decided > 0 ? eng.wins * 100.0 / decided : 0.0
@@ -332,4 +345,5 @@ if showTable and barstate.islast
     f_row(5, "Break-even", str.tostring(eng.bes), color.orange)
     f_row(6, "Win Rate", str.tostring(winRate, "#.#") + "%", winRate >= 50 ? color.green : color.red)
     f_row(7, "Win/Loss Ratio", str.tostring(wlRatio, "#.##"), wlRatio >= 1 ? color.green : color.red)
-    f_row(8, "Lookback", str.tostring(lookbackWeeks) + " weeks", color.white)
+    f_row(8, "Trades Today", str.tostring(eng.dayTrades) + (maxPerDay > 0 ? " / " + str.tostring(maxPerDay) : ""), dayFull ? color.orange : color.white)
+    f_row(9, "Lookback", str.tostring(lookbackWeeks) + " weeks", color.white)
