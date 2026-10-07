@@ -9,7 +9,7 @@
 //    LONG  = prev close above MA, wick trades at/below MA, candle closes back above MA.
 //    SHORT = prev close below MA, wick trades at/above MA, candle closes back below MA.
 //    The position is placed at the close of the next 3m candle after the wick candle closes.
-// 4. User lot size. SL at the wick extreme (+ optional buffer), capped so risk <= Max SL Risk % of balance.
+// 4. User lot size. SL at the wick of the 3m entry candle (+ optional buffer), capped so risk <= Max SL Risk % of balance.
 // 5. 100% TP at previous day high (long) / low (short), rounded to a whole number toward entry.
 // 6. SL moves to break-even once 1R is reached.
 // Same bar SL+TP touch is counted as SL (conservative).
@@ -41,7 +41,7 @@ wickMode = input.string("5m or 15m", "Wick Confirmation", options=["5m", "15m", 
 balanceIn = input.float(10000, "Account Balance", minval=1, group="Risk", display=display.none, tooltip="Only used for the max SL risk cap.")
 lots = input.float(0.10, "Lot Size", minval=0.01, step=0.01, group="Risk", display=display.none)
 contractIn = input.float(0, "Contract Size (0 = auto)", minval=0, group="Risk", display=display.none, tooltip="MT5 SYMBOL_TRADE_CONTRACT_SIZE. 0 = auto: XAU 100, XAG 5000, forex 100000, others 1. Only used for the max SL risk cap.")
-slBuffer = input.float(0, "SL Buffer (price) beyond wick", minval=0, group="Risk", display=display.none, tooltip="Extra distance added beyond the wick extreme. Eg. 0.5 = 50 cents on gold.")
+slBuffer = input.float(0, "SL Buffer (price) beyond wick", minval=0, group="Risk", display=display.none, tooltip="Extra distance added beyond the 3m candle wick. Eg. 0.5 = 50 cents on gold.")
 maxRiskPct = input.float(30, "Max SL Risk % of Balance", minval=0.1, maxval=100, group="Risk", display=display.none)
 wholeStep = input.float(1.0, "Whole Number Step", minval=0, group="Targets", display=display.none, tooltip="TP = prev day high/low rounded to this step toward entry. 1.0 for gold, 0.01 for EURUSD. 0 = no rounding.")
 beRR = input.float(1.0, "Move SL to BE at RR", minval=0.1, step=0.1, group="Targets", display=display.none)
@@ -83,7 +83,7 @@ new15 = timeframe.change("15")
 // chart > 3m  : read the 3m candles inside the chart bar and use the first one's close
 chartSec = timeframe.in_seconds()
 lowTf = chartSec <= 180
-c3 = request.security(syminfo.tickerid, lowTf ? "3" : timeframe.period, close[1], lookahead=barmerge.lookahead_on)
+[h3, l3, c3] = request.security(syminfo.tickerid, lowTf ? "3" : timeframe.period, [high[1], low[1], close[1]], lookahead=barmerge.lookahead_on)
 new3 = timeframe.change("3")
 [h3a, l3a, c3a] = request.security_lower_tf(syminfo.tickerid, lowTf ? timeframe.period : "3", [high, low, close])
 
@@ -119,7 +119,6 @@ shortSig = switch effMode
 var int state = 0
 var int dir = 0
 var int pDir = 0
-var float pSl = na
 var int pBar = na
 var float entryPx = na
 var float slPx = na
@@ -150,29 +149,26 @@ if state == 1 and touched
 // ===== Wick found -> wait for 3m close =====
 if state == 2 and longSig != shortSig
     d = longSig ? 1 : -1
-    w5 = effMode != "15m" and (d == 1 ? bull5 : bear5)
-    w15 = effMode != "5m" and (d == 1 ? bull15 : bear15)
-    if d == 1
-        pSl := w5 and w15 ? math.min(l5, l15) : w5 ? l5 : l15
-    else
-        pSl := w5 and w15 ? math.max(h5, h15) : w5 ? h5 : h15
-    pSl := pSl - d * slBuffer
     pDir := d
     pBar := bar_index
     state := 4
 
 // ===== 3m fill =====
+// SL goes at the wick of the 3m entry candle (low for long, high for short)
 float fillPx = na
+float sl3 = na
 float postH = high
 float postL = low
 if state == 4
     if lowTf
         if new3 and bar_index > pBar
             fillPx := c3
+            sl3 := pDir == 1 ? l3 : h3
     else
         n = array.size(c3a)
         if n >= 2 or (n >= 1 and barstate.isconfirmed)
             fillPx := array.get(c3a, 0)
+            sl3 := pDir == 1 ? array.get(l3a, 0) : array.get(h3a, 0)
             postH := na
             postL := na
             if n > 1
@@ -190,9 +186,10 @@ if not na(fillPx)
     ep = fillPx
     tp0 = d == 1 ? f_whole(pdh, wholeStep, true) : f_whole(pdl, wholeStep, false)
     maxDist = (balanceIn * maxRiskPct / 100) / (lots * contractSize)
-    rawDist = d == 1 ? ep - pSl : pSl - ep
+    slRaw = sl3 - d * slBuffer
+    rawDist = d == 1 ? ep - slRaw : slRaw - ep
     validTp = not na(tp0) and (d == 1 ? tp0 > ep : tp0 < ep)
-    // 3m close back through the wick or no room to the target -> skip and stay armed
+    // No wick on the 3m candle or no room to the target -> skip and stay armed
     if rawDist <= 0 or not validTp
         state := 2
     else
