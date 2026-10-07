@@ -4,11 +4,12 @@
 //
 // Rules
 // 1. 1H SMA(200) computed on LOW prices.
-// 2. Manual toggle "Strategy Active". When ON, waits for price to touch / pass the 1H MA (ARMED).
+// 2. Manual toggle "Strategy Active" (or Auto mode). When ON, waits for price to touch / pass the 1H MA (ARMED).
 // 3. Entry on a 5m and/or 15m wick rejection of the MA:
 //    LONG  = prev close above MA, wick trades at/below MA, candle closes back above MA.
 //    SHORT = prev close below MA, wick trades at/above MA, candle closes back below MA.
-// 4. User lot size. SL at the wick extreme, capped so risk <= Max SL Risk % of balance.
+//    The position is placed at the close of the next 3m candle after the wick candle closes.
+// 4. User lot size. SL at the wick extreme (+ optional buffer), capped so risk <= Max SL Risk % of balance.
 // 5. 100% TP at previous day high (long) / low (short), rounded to a whole number toward entry.
 // 6. SL moves to break-even once 1R is reached.
 // Same bar SL+TP touch is counted as SL (conservative).
@@ -27,27 +28,27 @@
 indicator("MA200 Wick Rejection [kasutufx]", shorttitle="MA200 Wick", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
 
 // ===== Inputs =====
-mode = input.string("Manual", "Mode", options=["Manual", "Auto"], group="Control", tooltip="Manual = uses the toggle and Active From date. Auto = always on across all chart history, re-arms after every trade.")
-active = input.bool(true, "Strategy Active (manual toggle)", group="Control")
-startTime = input.time(timestamp("2025-01-01T00:00:00"), "Active From", group="Control", tooltip="Manual mode only. Signals and stats are only counted from this date.")
-maLen = input.int(200, "MA Length", minval=1, group="Moving Average")
-maTF = input.timeframe("60", "MA Timeframe", group="Moving Average")
-smoothType = input.string("None", "Smoothing Type", options=["None", "SMA", "SMA + Bollinger Bands", "EMA", "SMMA (RMA)", "WMA", "VWMA"], group="Smoothing", tooltip="Same smoothing options as the built-in TradingView Moving Average indicator, applied to the 1H MA.")
-smoothLen = input.int(14, "Smoothing Length", minval=1, group="Smoothing")
-bbMult = input.float(2.0, "BB StdDev", minval=0.001, maxval=50, step=0.5, group="Smoothing", tooltip="Only used with SMA + Bollinger Bands.")
-signalLine = input.string("Smoothed MA", "Strategy Uses", options=["Smoothed MA", "Raw MA"], group="Smoothing", tooltip="Which line the touch and wick rules use. Falls back to the raw MA when Smoothing Type is None.")
-wickMode = input.string("5m or 15m", "Wick Confirmation", options=["5m", "15m", "5m or 15m", "5m and 15m"], group="Entry")
-balanceIn = input.float(10000, "Account Balance", minval=1, group="Risk", tooltip="Only used for the max SL risk cap.")
-lots = input.float(0.10, "Lot Size", minval=0.01, step=0.01, group="Risk")
-contractSize = input.float(100000, "Contract Size (units per lot)", minval=0.0001, group="Risk", tooltip="MT5 SYMBOL_TRADE_CONTRACT_SIZE. Forex = 100000, XAUUSD = 100, many indices = 1. Only used for the max SL risk cap (assumes account currency = quote currency).")
-maxRiskPct = input.float(30, "Max SL Risk % of Balance", minval=0.1, maxval=100, group="Risk")
-wholeStep = input.float(1.0, "Whole Number Step", minval=0, group="Targets", tooltip="TP = prev day high/low rounded to this step toward entry. 1.0 for gold, 0.01 for EURUSD. 0 = no rounding.")
-beRR = input.float(1.0, "Move SL to BE at RR", minval=0.1, step=0.1, group="Targets")
-showPD = input.bool(true, "Show Prev Day High/Low", group="Display")
-showTable = input.bool(true, "Show Stats Table", group="Display")
+mode = input.string("Manual", "Mode", options=["Manual", "Auto"], group="Control", display=display.none, tooltip="Manual = uses the toggle and Active From date. Auto = always on across all chart history, re-arms after every trade.")
+active = input.bool(true, "Strategy Active (manual toggle)", group="Control", display=display.none)
+startTime = input.time(timestamp("2025-01-01T00:00:00"), "Active From", group="Control", display=display.none, tooltip="Manual mode only. Signals and stats are only counted from this date.")
+maLen = input.int(200, "MA Length", minval=1, group="Moving Average", display=display.none)
+maTF = input.timeframe("60", "MA Timeframe", group="Moving Average", display=display.none)
+smoothType = input.string("None", "Smoothing Type", options=["None", "SMA", "SMA + Bollinger Bands", "EMA", "SMMA (RMA)", "WMA", "VWMA"], group="Smoothing", display=display.none, tooltip="Same smoothing options as the built-in TradingView Moving Average indicator, applied to the 1H MA.")
+smoothLen = input.int(14, "Smoothing Length", minval=1, group="Smoothing", display=display.none)
+bbMult = input.float(2.0, "BB StdDev", minval=0.001, maxval=50, step=0.5, group="Smoothing", display=display.none, tooltip="Only used with SMA + Bollinger Bands.")
+signalLine = input.string("Smoothed MA", "Strategy Uses", options=["Smoothed MA", "Raw MA"], group="Smoothing", display=display.none, tooltip="Which line the touch and wick rules use. Falls back to the raw MA when Smoothing Type is None.")
+wickMode = input.string("5m or 15m", "Wick Confirmation", options=["5m", "15m", "5m or 15m", "5m and 15m"], group="Entry", display=display.none, tooltip="Entry is placed at the close of the next 3m candle after the wick candle.")
+balanceIn = input.float(10000, "Account Balance", minval=1, group="Risk", display=display.none, tooltip="Only used for the max SL risk cap.")
+lots = input.float(0.10, "Lot Size", minval=0.01, step=0.01, group="Risk", display=display.none)
+contractIn = input.float(0, "Contract Size (0 = auto)", minval=0, group="Risk", display=display.none, tooltip="MT5 SYMBOL_TRADE_CONTRACT_SIZE. 0 = auto: XAU 100, XAG 5000, forex 100000, others 1. Only used for the max SL risk cap.")
+slBuffer = input.float(0, "SL Buffer (price) beyond wick", minval=0, group="Risk", display=display.none, tooltip="Extra distance added beyond the wick extreme. Eg. 0.5 = 50 cents on gold.")
+maxRiskPct = input.float(30, "Max SL Risk % of Balance", minval=0.1, maxval=100, group="Risk", display=display.none)
+wholeStep = input.float(1.0, "Whole Number Step", minval=0, group="Targets", display=display.none, tooltip="TP = prev day high/low rounded to this step toward entry. 1.0 for gold, 0.01 for EURUSD. 0 = no rounding.")
+beRR = input.float(1.0, "Move SL to BE at RR", minval=0.1, step=0.1, group="Targets", display=display.none)
+showPD = input.bool(false, "Show Prev Day High/Low", group="Display", display=display.none)
+showTable = input.bool(true, "Show Stats Table", group="Display", display=display.none)
 
 // ===== Data =====
-// Closed 1H bar values only (non-repainting)
 // Smoothing, as in the built-in Moving Average indicator
 f_smooth(src, len, t) =>
     switch t
@@ -58,6 +59,7 @@ f_smooth(src, len, t) =>
         "WMA" => ta.wma(src, len)
         "VWMA" => ta.vwma(src, len)
         => na
+// Closed 1H bar values only (non-repainting)
 f_maSet() =>
     base = ta.sma(low, maLen)
     sm = f_smooth(base, smoothLen, smoothType)
@@ -76,11 +78,22 @@ f_bar() => [high[1], low[1], close[1], close[2]]
 new5 = timeframe.change("5")
 new15 = timeframe.change("15")
 
-// On a 15m chart, "5m or 15m" falls back to 15m wicks (5m candles are not visible there)
+// 3m entry candle
+// chart <= 3m : wait for the next 3m candle to close and use its close
+// chart > 3m  : read the 3m candles inside the chart bar and use the first one's close
 chartSec = timeframe.in_seconds()
+lowTf = chartSec <= 180
+c3 = request.security(syminfo.tickerid, lowTf ? "3" : timeframe.period, close[1], lookahead=barmerge.lookahead_on)
+new3 = timeframe.change("3")
+[h3a, l3a, c3a] = request.security_lower_tf(syminfo.tickerid, lowTf ? timeframe.period : "3", [high, low, close])
+
+// On a 15m chart, "5m or 15m" falls back to 15m wicks (5m candles are not visible there)
 effMode = wickMode == "5m or 15m" and chartSec > 300 and chartSec <= 900 ? "15m" : wickMode
 needSec = effMode == "15m" ? 900 : 300
-tfOk = timeframe.isintraday and timeframe.in_seconds() <= needSec
+tfOk = timeframe.isintraday and chartSec <= needSec
+
+autoContract = str.contains(syminfo.ticker, "XAU") ? 100.0 : str.contains(syminfo.ticker, "XAG") ? 5000.0 : syminfo.type == "forex" ? 100000.0 : 1.0
+contractSize = contractIn > 0 ? contractIn : autoContract
 
 f_whole(p, step, down) => step > 0 ? (down ? math.floor(p / step) * step : math.ceil(p / step) * step) : p
 
@@ -102,19 +115,22 @@ shortSig = switch effMode
     => bear5 and bear15
 
 // ===== State =====
-// 0 = OFF, 1 = WAITING FOR MA TOUCH, 2 = ARMED, 3 = IN TRADE
+// 0 = OFF, 1 = WAITING FOR MA TOUCH, 2 = ARMED, 4 = WICK FOUND, WAITING 3M CLOSE, 3 = IN TRADE
 var int state = 0
 var int dir = 0
+var int pDir = 0
+var float pSl = na
+var int pBar = na
 var float entryPx = na
 var float slPx = na
 var float tpPx = na
 var float riskDist = na
 var bool beDone = false
+var bool capped = false
 var int wins = 0
 var int losses = 0
 var int bes = 0
-var line entryLn = na
-var line slLn = na
+var line beLn = na
 var box tpBox = na
 var box slBox = na
 
@@ -131,26 +147,57 @@ touched = (low <= ma and high >= ma) or (low > ma and close[1] < ma) or (high < 
 if state == 1 and touched
     state := 2
 
+// ===== Wick found -> wait for 3m close =====
+if state == 2 and longSig != shortSig
+    d = longSig ? 1 : -1
+    w5 = effMode != "15m" and (d == 1 ? bull5 : bear5)
+    w15 = effMode != "5m" and (d == 1 ? bull15 : bear15)
+    if d == 1
+        pSl := w5 and w15 ? math.min(l5, l15) : w5 ? l5 : l15
+    else
+        pSl := w5 and w15 ? math.max(h5, h15) : w5 ? h5 : h15
+    pSl := pSl - d * slBuffer
+    pDir := d
+    pBar := bar_index
+    state := 4
+
+// ===== 3m fill =====
+float fillPx = na
+float postH = high
+float postL = low
+if state == 4
+    if lowTf
+        if new3 and bar_index > pBar
+            fillPx := c3
+    else
+        n = array.size(c3a)
+        if n >= 2 or (n >= 1 and barstate.isconfirmed)
+            fillPx := array.get(c3a, 0)
+            postH := na
+            postL := na
+            if n > 1
+                for i = 1 to n - 1
+                    postH := na(postH) ? array.get(h3a, i) : math.max(postH, array.get(h3a, i))
+                    postL := na(postL) ? array.get(l3a, i) : math.min(postL, array.get(l3a, i))
+        else if bar_index > pBar
+            state := 2
+
 // ===== Entry =====
 enteredLong = false
 enteredShort = false
-if state == 2 and longSig != shortSig
-    d = longSig ? 1 : -1
-    useBoth5 = effMode != "15m" and (d == 1 ? bull5 : bear5)
-    useBoth15 = effMode != "5m" and (d == 1 ? bull15 : bear15)
-    ep = useBoth5 ? c5 : c15
-    float rawSl = na
-    if d == 1
-        rawSl := useBoth5 and useBoth15 ? math.min(l5, l15) : useBoth5 ? l5 : l15
-    else
-        rawSl := useBoth5 and useBoth15 ? math.max(h5, h15) : useBoth5 ? h5 : h15
+if not na(fillPx)
+    d = pDir
+    ep = fillPx
     tp0 = d == 1 ? f_whole(pdh, wholeStep, true) : f_whole(pdl, wholeStep, false)
     maxDist = (balanceIn * maxRiskPct / 100) / (lots * contractSize)
-    rawDist = math.abs(ep - rawSl)
-    capped = rawDist > maxDist
-    dist = math.min(rawDist, maxDist)
+    rawDist = d == 1 ? ep - pSl : pSl - ep
     validTp = not na(tp0) and (d == 1 ? tp0 > ep : tp0 < ep)
-    if dist > 0 and validTp
+    // 3m close back through the wick or no room to the target -> skip and stay armed
+    if rawDist <= 0 or not validTp
+        state := 2
+    else
+        dist = math.min(rawDist, maxDist)
+        capped := rawDist > maxDist
         state := 3
         dir := d
         entryPx := ep
@@ -158,25 +205,22 @@ if state == 2 and longSig != shortSig
         tpPx := tp0
         riskDist := dist
         beDone := false
+        beLn := na
         enteredLong := d == 1
         enteredShort := d == -1
-        entryLn := line.new(bar_index, entryPx, bar_index, entryPx, color=color.blue, width=2)
-        slLn := na
         rr = math.abs(tpPx - entryPx) / dist
         // Long / Short Position tool style: green profit zone, red loss zone
-        tpTxt = "Target: " + str.tostring(tpPx, format.mintick) + " (" + str.tostring(math.abs(tpPx - entryPx) / entryPx * 100, "#.##") + "%)"
-        slTxt = "Stop: " + str.tostring(slPx, format.mintick) + " (" + str.tostring(dist / entryPx * 100, "#.##") + "%)"
-        tpBox := box.new(bar_index, math.max(entryPx, tpPx), bar_index + 1, math.min(entryPx, tpPx), border_color=color.new(color.green, 30), bgcolor=color.new(color.green, 80), text=tpTxt, text_color=color.white, text_size=size.small, text_halign=text.align_left, text_valign=d == 1 ? text.align_top : text.align_bottom)
-        slBox := box.new(bar_index, math.max(entryPx, slPx), bar_index + 1, math.min(entryPx, slPx), border_color=color.new(color.red, 30), bgcolor=color.new(color.red, 80), text=slTxt, text_color=color.white, text_size=size.small, text_halign=text.align_left, text_valign=d == 1 ? text.align_bottom : text.align_top)
-        txt = (d == 1 ? "LONG " : "SHORT ") + str.tostring(entryPx, format.mintick) + "\nQty: " + str.tostring(lots) + " lots | Risk/Reward Ratio: " + str.tostring(rr, "#.##") + (capped ? "\nSL capped at " + str.tostring(maxRiskPct) + "% risk" : "")
-        label.new(bar_index, entryPx, txt, color=color.new(color.blue, 10), textcolor=color.white, style=label.style_label_right, size=size.small)
+        tpBox := box.new(bar_index, math.max(entryPx, tpPx), bar_index + 1, math.min(entryPx, tpPx), border_color=color.new(color.green, 60), bgcolor=color.new(color.green, 85))
+        slBox := box.new(bar_index, math.max(entryPx, slPx), bar_index + 1, math.min(entryPx, slPx), border_color=color.new(color.red, 60), bgcolor=color.new(color.red, 85))
+        tip = "Entry (3m close): " + str.tostring(entryPx, format.mintick) + "\nSL: " + str.tostring(slPx, format.mintick) + (capped ? " (capped at " + str.tostring(maxRiskPct) + "% risk)" : "") + "\nTP: " + str.tostring(tpPx, format.mintick) + "\nRR: " + str.tostring(rr, "#.##") + "\nLots: " + str.tostring(lots)
+        label.new(bar_index, entryPx, d == 1 ? "L" : "S", color=color.new(color.blue, 20), textcolor=color.white, style=label.style_label_right, size=size.tiny, tooltip=tip)
 
 // ===== Trade management =====
 float exitPx = na
 string res = ""
 if state == 3
-    hitSl = dir == 1 ? low <= slPx : high >= slPx
-    hitTp = dir == 1 ? high >= tpPx : low <= tpPx
+    hitSl = dir == 1 ? postL <= slPx : postH >= slPx
+    hitTp = dir == 1 ? postH >= tpPx : postL <= tpPx
     beLevel = entryPx + dir * riskDist * beRR
     if hitSl
         exitPx := slPx
@@ -184,14 +228,12 @@ if state == 3
     else if hitTp
         exitPx := tpPx
         res := "WIN"
-    else if not beDone and (dir == 1 ? high >= beLevel : low <= beLevel)
+    else if not beDone and (dir == 1 ? postH >= beLevel : postL <= beLevel)
         beDone := true
         slPx := entryPx
-        slLn := line.new(bar_index, entryPx, bar_index, entryPx, color=color.orange, style=line.style_dashed, width=2)
-        label.new(bar_index, entryPx, "SL → BE", color=color.new(color.orange, 100), textcolor=color.orange, style=label.style_label_left, size=size.small)
-    line.set_x2(entryLn, bar_index)
-    if not na(slLn)
-        line.set_x2(slLn, bar_index)
+        beLn := line.new(bar_index, entryPx, bar_index, entryPx, color=color.orange, style=line.style_dashed, width=1)
+    if not na(beLn)
+        line.set_x2(beLn, bar_index)
     box.set_right(tpBox, bar_index + 1)
     box.set_right(slBox, bar_index + 1)
 
@@ -206,7 +248,7 @@ if not na(exitPx)
     else
         bes += 1
     exitCol = exitWin ? color.green : exitLoss ? color.red : color.orange
-    label.new(bar_index, exitPx, res, color=exitCol, textcolor=color.white, style=dir == 1 ? (exitWin ? label.style_label_down : label.style_label_up) : (exitWin ? label.style_label_up : label.style_label_down), size=size.small)
+    label.new(bar_index, exitPx, exitWin ? "W" : exitLoss ? "L" : "BE", color=exitCol, textcolor=color.white, style=label.style_label_left, size=size.tiny, tooltip=res + " @ " + str.tostring(exitPx, format.mintick))
     state := enabled ? 1 : 0
     dir := 0
 
@@ -218,29 +260,22 @@ bbLo = plot(smoothOn ? maSmooth - maDev : na, "BB Lower", color=color.new(color.
 fill(bbUp, bbLo, color=color.new(color.green, 92), title="BB Fill")
 plot(showPD ? pdh : na, "Prev Day High", color=color.new(color.green, 60), style=plot.style_stepline)
 plot(showPD ? pdl : na, "Prev Day Low", color=color.new(color.red, 60), style=plot.style_stepline)
-bgcolor(state == 2 ? color.new(color.yellow, 92) : na, title="Armed")
 
 alertcondition(enteredLong, "Long Entry", "MA200 Wick: LONG entry")
 alertcondition(enteredShort, "Short Entry", "MA200 Wick: SHORT entry")
 alertcondition(exitWin or exitLoss or exitBe, "Trade Exit", "MA200 Wick: trade closed")
 
 // ===== Stats table =====
-var table tbl = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 20), border_width=1, border_color=color.gray)
+var table tbl = table.new(position.top_right, 2, 3, bgcolor=color.new(color.black, 30))
 f_row(r, k, v, c) =>
-    table.cell(tbl, 0, r, k, text_color=color.white, text_size=size.small, text_halign=text.align_left)
-    table.cell(tbl, 1, r, v, text_color=c, text_size=size.small, text_halign=text.align_right)
+    table.cell(tbl, 0, r, k, text_color=color.gray, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(tbl, 1, r, v, text_color=c, text_size=size.tiny, text_halign=text.align_right)
 
 if showTable and barstate.islast
-    statusTxt = not tfOk ? "USE ≤ " + (needSec == 900 ? "15m" : "5m") + " CHART" : state == 0 ? "OFF" : state == 1 ? "WAITING 1H MA TOUCH" : state == 2 ? "ARMED - WAIT WICK" : dir == 1 ? "IN LONG" : "IN SHORT"
-    statusCol = state == 3 ? color.aqua : state == 2 ? color.yellow : state == 1 ? color.white : color.gray
+    statusTxt = not tfOk ? "Use ≤ " + (needSec == 900 ? "15m" : "5m") + " chart" : state == 0 ? "Off" : state == 1 ? "Wait MA touch" : state == 2 ? "Armed" : state == 4 ? "Wick, wait 3m" : dir == 1 ? "In long" : "In short"
+    statusCol = state == 3 ? color.aqua : state == 2 or state == 4 ? color.yellow : color.white
     decided = wins + losses
     winRate = decided > 0 ? wins * 100.0 / decided : 0.0
-    wlRatio = losses > 0 ? wins * 1.0 / losses : wins * 1.0
-    f_row(0, "Status [" + mode + " | " + effMode + "]", statusTxt, statusCol)
-    f_row(1, (useSmooth ? "1H Smoothed MA" : "1H MA") + str.tostring(maLen), str.tostring(ma, format.mintick), useSmooth ? color.aqua : color.yellow)
-    f_row(2, "PDH / PDL", str.tostring(pdh, format.mintick) + " / " + str.tostring(pdl, format.mintick), color.white)
-    f_row(3, "Wins", str.tostring(wins), color.green)
-    f_row(4, "Losses", str.tostring(losses), color.red)
-    f_row(5, "Break-even", str.tostring(bes), color.orange)
-    f_row(6, "Win Rate", str.tostring(winRate, "#.#") + "%", winRate >= 50 ? color.green : color.red)
-    f_row(7, "Win/Loss Ratio", str.tostring(wlRatio, "#.##"), wlRatio >= 1 ? color.green : color.red)
+    f_row(0, mode + " · " + effMode, statusTxt, statusCol)
+    f_row(1, "W / L / BE", str.tostring(wins) + " / " + str.tostring(losses) + " / " + str.tostring(bes), color.white)
+    f_row(2, "Win rate", str.tostring(winRate, "#.#") + "%", winRate >= 50 ? color.green : color.red)
