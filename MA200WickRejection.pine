@@ -11,7 +11,7 @@
 //    SHORT = prev close below MA, wick trades at/above MA, candle closes back below MA.
 //    The position is placed at the close of the next 3m candle after the wick candle closes.
 // 4. User lot size. SL at the high/low of the wick candle (+ optional buffer), capped so risk <= Max SL Risk % of balance.
-// 5. 100% TP at previous day high (long) / low (short), rounded to a whole number toward entry.
+// 5. 100% TP at the rolling 24h high (long) / low (short), rounded to a whole number toward entry.
 // 6. SL moves to break-even once 1R is reached.
 // Same 3m candle SL+TP touch is counted as SL (conservative).
 //
@@ -21,7 +21,7 @@
 // MT5 port notes (for the EA version later)
 // MA       : iMA(_Symbol, PERIOD_H1, 200, 0, MODE_SMA, PRICE_LOW), read closed bar (shift 1) via CopyBuffer
 // Wicks    : CopyRates(_Symbol, PERIOD_M5 / PERIOD_M15, 1, 2, rates) on new bar, entry on PERIOD_M3 close
-// PDH/PDL  : iHigh/iLow(_Symbol, PERIOD_D1, 1)
+// 24h H/L  : iHighest/iLowest(_Symbol, PERIOD_M15, MODE_HIGH/MODE_LOW, 96, 1) -> iHigh/iLow at that shift
 // MA notes : create the iMA handle once in OnInit, check BarsCalculated before CopyBuffer, IndicatorRelease in OnDeinit
 // Risk     : lossPerLot = (slDist / SYMBOL_TRADE_TICK_SIZE) * SYMBOL_TRADE_TICK_VALUE_LOSS
 //            or OrderCalcProfit(type, _Symbol, lots, entry, sl, loss) (EA/script only, already in deposit currency)
@@ -47,9 +47,9 @@ lots = input.float(0.10, "Lot Size", minval=0.01, step=0.01, group="Risk", displ
 contractIn = input.float(0, "Contract Size (0 = auto)", minval=0, group="Risk", display=display.none, tooltip="MT5 SYMBOL_TRADE_CONTRACT_SIZE. 0 = auto: XAU 100, XAG 5000, forex 100000, others 1. Only used for the max SL risk cap.")
 slBuffer = input.float(0, "SL Buffer (price) beyond wick", minval=0, group="Risk", display=display.none, tooltip="Extra distance added beyond the wick candle high/low. Eg. 0.5 = 50 cents on gold.")
 maxRiskPct = input.float(30, "Max SL Risk % of Balance", minval=0.1, maxval=100, group="Risk", display=display.none)
-wholeStep = input.float(1.0, "Whole Number Step", minval=0, group="Targets", display=display.none, tooltip="TP = prev day high/low rounded to this step toward entry. 1.0 for gold, 0.01 for EURUSD. 0 = no rounding.")
+wholeStep = input.float(1.0, "Whole Number Step", minval=0, group="Targets", display=display.none, tooltip="TP = rolling 24h high/low rounded to this step toward entry. 1.0 for gold, 0.01 for EURUSD. 0 = no rounding.")
 beRR = input.float(1.0, "Move SL to BE at RR", minval=0.1, step=0.1, group="Targets", display=display.none)
-showPD = input.bool(false, "Show Prev Day High/Low", group="Display", display=display.none)
+showPD = input.bool(false, "Show 24h High/Low", group="Display", display=display.none)
 showTable = input.bool(true, "Show Info Panel", group="Display", display=display.none)
 
 // ===== Constants =====
@@ -85,7 +85,8 @@ f_maSet() =>
 smoothOn = smoothType != "None"
 useSmooth = smoothOn and signalLine == "Smoothed MA"
 ma = useSmooth ? maSmooth : maRaw
-[pdh, pdl] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead=barmerge.lookahead_on)
+// Rolling 24h high/low for display (closed 15m candles)
+[hi24, lo24] = request.security(syminfo.tickerid, "15", [ta.highest(high, 96)[1], ta.lowest(low, 96)[1]], lookahead=barmerge.lookahead_on)
 
 // ===== 3m / 5m / 15m candles of the current chart bar =====
 // Lower than or equal to chart TF: all candles inside the bar. Higher: the candle that just closed.
@@ -102,6 +103,17 @@ f_candles(simple string tf) =>
 [t3, h3, l3, c3] = f_candles("3")
 [t5, h5, l5, c5] = f_candles("5")
 [t15, h15, l15, c15] = f_candles("15")
+
+// Rolling 24h (96 x 15m) high/low as of each 15m candle close, aligned with the 15m candles above
+f_range24() =>
+    isLower = 900 <= chartSec
+    [hiL, loL] = request.security_lower_tf(syminfo.tickerid, isLower ? "15" : timeframe.period, [ta.highest(high, 96), ta.lowest(low, 96)])
+    [hiH, loH] = request.security(syminfo.tickerid, isLower ? timeframe.period : "15", [ta.highest(high, 96)[1], ta.lowest(low, 96)[1]], lookahead=barmerge.lookahead_on)
+    take = not isLower and timeframe.change("15") and not na(hiH)
+    hA = isLower ? hiL : take ? array.from(hiH) : array.new<float>()
+    lA = isLower ? loL : take ? array.from(loH) : array.new<float>()
+    [hA, lA]
+[r24h, r24l] = f_range24()
 
 // ===== Engine =====
 // state: 0 = OFF, 1 = WAIT MA TOUCH, 2 = ARMED, 4 = WICK FOUND, WAIT 3M CLOSE, 3 = IN TRADE
@@ -120,6 +132,8 @@ type Engine
     float prev3 = na
     float prev5 = na
     float prev15 = na
+    float hi24 = na
+    float lo24 = na
     int bull5T = na
     int bear5T = na
     int wins = 0
@@ -135,7 +149,7 @@ type Engine
 f_whole(p, step, down) => step > 0 ? (down ? math.floor(p / step) * step : math.ceil(p / step) * step) : p
 
 // A closed 5m / 15m candle: wick rejection check
-f_wick(Engine e, bool is5, int t, float h, float l, float c, float m) =>
+f_wick(Engine e, bool is5, int t, float h, float l, float c, float m, float rh, float rl) =>
     T = t + (is5 ? MS5 : MS15)
     pc = is5 ? e.prev5 : e.prev15
     bull = not na(pc) and pc > m and l <= m and c > m
@@ -152,6 +166,8 @@ f_wick(Engine e, bool is5, int t, float h, float l, float c, float m) =>
         sigS := use5 and bear
     else
         e.prev15 := c
+        e.hi24 := rh
+        e.lo24 := rl
         sigL := (use15 and bull) or (both and bull and e.bull5T == T)
         sigS := (use15 and bear) or (both and bear and e.bear5T == T)
     if e.state == 2 and sigL != sigS
@@ -162,8 +178,11 @@ f_wick(Engine e, bool is5, int t, float h, float l, float c, float m) =>
         e.state := 4
 
 // A closed 3m candle: manage trade, fill pending entry, detect MA touch
-f_bar3(Engine e, int t, float h, float l, float c, float m, float pdhV, float pdlV) =>
+f_bar3(Engine e, int t, float h, float l, float c, float m) =>
     T = t + MS3
+    // keep the 24h range current between 15m closes
+    e.hi24 := na(e.hi24) ? na : math.max(e.hi24, h)
+    e.lo24 := na(e.lo24) ? na : math.min(e.lo24, l)
     if e.state == 3
         float px = na
         string res = ""
@@ -197,7 +216,7 @@ f_bar3(Engine e, int t, float h, float l, float c, float m, float pdhV, float pd
             e.evExit := true
     else if e.state == 4 and T > e.pT
         d = e.pDir
-        tp0 = d == 1 ? f_whole(pdhV, wholeStep, true) : f_whole(pdlV, wholeStep, false)
+        tp0 = d == 1 ? f_whole(e.hi24, wholeStep, true) : f_whole(e.lo24, wholeStep, false)
         rawDist = d == 1 ? c - e.pSl : e.pSl - c
         validTp = not na(tp0) and (d == 1 ? tp0 > c : tp0 < c)
         // 3m close back through the wick or no room to the target -> skip and stay armed
@@ -258,18 +277,18 @@ if tfOk and inLookback and not na(ma)
                 break
             // wick candles that closed before this 3m candle closed
             while i5 < n5 and array.get(t5, i5) + MS5 < T3
-                f_wick(eng, true, array.get(t5, i5), array.get(h5, i5), array.get(l5, i5), array.get(c5, i5), ma)
+                f_wick(eng, true, array.get(t5, i5), array.get(h5, i5), array.get(l5, i5), array.get(c5, i5), ma, na, na)
                 i5 += 1
             while i15 < n15 and array.get(t15, i15) + MS15 < T3
-                f_wick(eng, false, array.get(t15, i15), array.get(h15, i15), array.get(l15, i15), array.get(c15, i15), ma)
+                f_wick(eng, false, array.get(t15, i15), array.get(h15, i15), array.get(l15, i15), array.get(c15, i15), ma, i15 < array.size(r24h) ? array.get(r24h, i15) : na, i15 < array.size(r24l) ? array.get(r24l, i15) : na)
                 i15 += 1
-            f_bar3(eng, array.get(t3, i), array.get(h3, i), array.get(l3, i), array.get(c3, i), ma, pdh, pdl)
+            f_bar3(eng, array.get(t3, i), array.get(h3, i), array.get(l3, i), array.get(c3, i), ma)
     // wick candles closing at the end of this bar
     while i5 < n5 and array.get(t5, i5) + MS5 <= nowT
-        f_wick(eng, true, array.get(t5, i5), array.get(h5, i5), array.get(l5, i5), array.get(c5, i5), ma)
+        f_wick(eng, true, array.get(t5, i5), array.get(h5, i5), array.get(l5, i5), array.get(c5, i5), ma, na, na)
         i5 += 1
     while i15 < n15 and array.get(t15, i15) + MS15 <= nowT
-        f_wick(eng, false, array.get(t15, i15), array.get(h15, i15), array.get(l15, i15), array.get(c15, i15), ma)
+        f_wick(eng, false, array.get(t15, i15), array.get(h15, i15), array.get(l15, i15), array.get(c15, i15), ma, i15 < array.size(r24h) ? array.get(r24h, i15) : na, i15 < array.size(r24l) ? array.get(r24l, i15) : na)
         i15 += 1
 
 // ===== Plots =====
@@ -278,8 +297,8 @@ plot(smoothOn ? maSmooth : na, "Smoothed MA", color=color.aqua, linewidth=2)
 bbUp = plot(smoothOn ? maSmooth + maDev : na, "BB Upper", color=color.new(color.green, 50))
 bbLo = plot(smoothOn ? maSmooth - maDev : na, "BB Lower", color=color.new(color.green, 50))
 fill(bbUp, bbLo, color=color.new(color.green, 92), title="BB Fill")
-plot(showPD ? pdh : na, "Prev Day High", color=color.new(color.green, 60), style=plot.style_stepline)
-plot(showPD ? pdl : na, "Prev Day Low", color=color.new(color.red, 60), style=plot.style_stepline)
+plot(showPD ? hi24 : na, "24h High", color=color.new(color.green, 60), style=plot.style_stepline)
+plot(showPD ? lo24 : na, "24h Low", color=color.new(color.red, 60), style=plot.style_stepline)
 
 alertcondition(eng.evLong, "Long Entry", "MA200 Wick: LONG entry")
 alertcondition(eng.evShort, "Short Entry", "MA200 Wick: SHORT entry")
@@ -300,7 +319,7 @@ if showTable and barstate.islast
     wlRatio = eng.losses > 0 ? eng.wins * 1.0 / eng.losses : eng.wins * 1.0
     f_row(0, "Status [" + mode + " | " + wickMode + "]", statusTxt, statusCol)
     f_row(1, (useSmooth ? "1H Smoothed MA" : "1H MA") + str.tostring(maLen), str.tostring(ma, format.mintick), useSmooth ? color.aqua : color.yellow)
-    f_row(2, "PDH / PDL", str.tostring(pdh, format.mintick) + " / " + str.tostring(pdl, format.mintick), color.white)
+    f_row(2, "24h High / Low", str.tostring(eng.hi24, format.mintick) + " / " + str.tostring(eng.lo24, format.mintick), color.white)
     f_row(3, "Wins", str.tostring(eng.wins), color.green)
     f_row(4, "Losses", str.tostring(eng.losses), color.red)
     f_row(5, "Break-even", str.tostring(eng.bes), color.orange)
