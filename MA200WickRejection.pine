@@ -14,7 +14,7 @@
 //    b) Triple close reversal: the last 3+ closed 3m AND 5m candles all closed bullish (long) / bearish (short),
 //       the run starts at the MA (its first candle or the one before touched it) and every close is on the
 //       trade side of the MA. Entered at that 3m close. SL at the run's extreme low (long) / high (short).
-// 4. User lot size. SL as set by the entry trigger (+ optional buffer), no risk cap.
+// 4. User lot size. SL at the trigger's high/low plus an ATR buffer (x ATR of 15m), no risk cap.
 // 5. 100% TP at the rolling 24h high (long) / low (short), rounded to a whole number toward entry.
 //    If entry is at the 24h extreme (no room), the previous day high/low is used instead.
 // 6. SL moves to break-even once 1R is reached.
@@ -52,7 +52,8 @@ useWick = input.bool(true, "Entry: Wick Rejection (5m / 15m)", group="Entry", di
 useTriple = input.bool(true, "Entry: Triple Close Reversal (3m + 5m)", group="Entry", display=display.none, tooltip="The last 3 closed 3m and 5m candles are all bullish (long) or all bearish (short) and reversed off the MA: the run starts at the MA (its first candle or the one before touched it) and every close is above (long) / below (short) the MA. Entered at that 3m close. SL at the run's extreme.")
 wickMode = input.string("5m or 15m", "Wick Timeframe", options=["5m", "15m", "5m or 15m", "5m and 15m"], group="Entry", display=display.none, tooltip="Which wick candles count for the wick rejection entry.")
 lots = input.float(0.10, "Lot Size", minval=0.01, step=0.01, group="Risk", display=display.none)
-slBuffer = input.float(0, "SL Buffer (price) beyond wick", minval=0, group="Risk", display=display.none, tooltip="Extra distance added beyond the wick candle high/low. Eg. 0.5 = 50 cents on gold.")
+atrLen = input.int(14, "SL ATR Length (15m)", minval=1, group="Risk", display=display.none, tooltip="ATR of the closed 15m candles, used to place the SL beyond the wick / run extreme.")
+atrMult = input.float(0.5, "SL Buffer (x ATR)", minval=0, step=0.1, group="Risk", display=display.none, tooltip="SL = wick (or triple-close run) high/low plus this many ATRs. 0 = exactly at the high/low.")
 wholeStep = input.float(1.0, "Whole Number Step", minval=0, group="Targets", display=display.none, tooltip="TP = rolling 24h high/low rounded to this step toward entry. 1.0 for gold, 0.01 for EURUSD. 0 = no rounding.")
 beRR = input.float(1.0, "Move SL to BE at RR", minval=0.1, step=0.1, group="Targets", display=display.none)
 showPD = input.bool(false, "Show 24h High/Low", group="Display", display=display.none)
@@ -110,16 +111,17 @@ f_candles(simple string tf) =>
 [t5, o5, h5, l5, c5] = f_candles("5")
 [t15, o15, h15, l15, c15] = f_candles("15")
 
-// Rolling 24h (96 x 15m) high/low as of each 15m candle close, aligned with the 15m candles above
+// Rolling 24h (96 x 15m) high/low and 15m ATR as of each 15m candle close, aligned with the 15m candles above
 f_range24() =>
     isLower = 900 <= chartSec
-    [hiL, loL] = request.security_lower_tf(syminfo.tickerid, isLower ? "15" : timeframe.period, [ta.highest(high, 96), ta.lowest(low, 96)])
-    [hiH, loH] = request.security(syminfo.tickerid, isLower ? timeframe.period : "15", [ta.highest(high, 96)[1], ta.lowest(low, 96)[1]], lookahead=barmerge.lookahead_on)
+    [hiL, loL, atL] = request.security_lower_tf(syminfo.tickerid, isLower ? "15" : timeframe.period, [ta.highest(high, 96), ta.lowest(low, 96), ta.atr(atrLen)])
+    [hiH, loH, atH] = request.security(syminfo.tickerid, isLower ? timeframe.period : "15", [ta.highest(high, 96)[1], ta.lowest(low, 96)[1], ta.atr(atrLen)[1]], lookahead=barmerge.lookahead_on)
     take = not isLower and timeframe.change("15") and not na(hiH)
     hA = isLower ? hiL : take ? array.from(hiH) : array.new<float>()
     lA = isLower ? loL : take ? array.from(loH) : array.new<float>()
-    [hA, lA]
-[r24h, r24l] = f_range24()
+    aA = isLower ? atL : take ? array.from(atH) : array.new<float>()
+    [hA, lA, aA]
+[r24h, r24l, ratr] = f_range24()
 
 // ===== Engine =====
 // Consecutive bullish / bearish closes on one timeframe, and whether the streak is a reversal off the MA
@@ -182,6 +184,7 @@ type Engine
     float prev15 = na
     float hi24 = na
     float lo24 = na
+    float atr = na
     int bull5T = na
     int bear5T = na
     Streak s3
@@ -204,6 +207,9 @@ type Engine
 f_skip(int T, float y, int d, string why) =>
     if showSkips
         label.new(T, y, "x", xloc=xloc.bar_time, color=color.new(color.gray, 100), textcolor=color.gray, style=d == 1 ? label.style_label_up : label.style_label_down, size=size.tiny, tooltip=(d == 1 ? "Long" : "Short") + " setup skipped - " + why)
+
+// ATR buffer beyond the stop structure
+f_slPad(Engine e) => na(e.atr) ? 0.0 : e.atr * atrMult
 
 f_whole(p, step, down) => step > 0 ? (down ? math.floor(p / step) * step : math.ceil(p / step) * step) : p
 
@@ -243,7 +249,7 @@ f_open(Engine e, int d, int T, float c, float slRaw, float pdhV, float pdlV, str
     opened
 
 // A closed 5m / 15m candle: wick rejection check
-f_wick(Engine e, bool is5, int t, float o, float h, float l, float c, float m, float rh, float rl) =>
+f_wick(Engine e, bool is5, int t, float o, float h, float l, float c, float m, float rh, float rl, float ra) =>
     T = t + (is5 ? MS5 : MS15)
     pc = is5 ? e.prev5 : e.prev15
     bull = not na(pc) and pc > m and l <= m and c > m
@@ -263,6 +269,7 @@ f_wick(Engine e, bool is5, int t, float o, float h, float l, float c, float m, f
         e.prev15 := c
         e.hi24 := rh
         e.lo24 := rl
+        e.atr := ra
         sigL := useWick and ((use15 and bull) or (both and bull and e.bull5T == T))
         sigS := useWick and ((use15 and bear) or (both and bear and e.bear5T == T))
     dayFull = maxPerDay > 0 and e.dayTrades >= maxPerDay
@@ -271,7 +278,7 @@ f_wick(Engine e, bool is5, int t, float o, float h, float l, float c, float m, f
         f_skip(T, d == 1 ? l : h, d, "wick: " + f_why(e))
     if e.state == 2 and sigL != sigS and not dayFull
         d = sigL ? 1 : -1
-        e.pSl := (d == 1 ? l : h) - d * slBuffer
+        e.pSl := (d == 1 ? l : h) - d * f_slPad(e)
         e.pDir := d
         e.pT := T
         e.state := 4
@@ -329,7 +336,7 @@ f_bar3(Engine e, int t, float o, float h, float l, float c, float m, float pdhV,
         d = newL ? 1 : -1
         dayFull = maxPerDay > 0 and e.dayTrades >= maxPerDay
         if e.state == 2 and not dayFull
-            slRaw = (d == 1 ? math.min(e.s3.upLow, e.s5.upLow) : math.max(e.s3.dnHigh, e.s5.dnHigh)) - d * slBuffer
+            slRaw = (d == 1 ? math.min(e.s3.upLow, e.s5.upLow) : math.max(e.s3.dnHigh, e.s5.dnHigh)) - d * f_slPad(e)
             f_open(e, d, T, c, slRaw, pdhV, pdlV, "triple close")
         else if e.state != 3 or e.dir != d
             f_skip(T, c, d, "triple close: " + f_why(e))
@@ -378,18 +385,18 @@ if tfOk and inLookback and not na(ma)
             // 5m / 15m candles that closed by the time this 3m candle closed
             // (a wick at the same time still fills on the next 3m close: see T > e.pT)
             while i5 < n5 and array.get(t5, i5) + MS5 <= T3
-                f_wick(eng, true, array.get(t5, i5), array.get(o5, i5), array.get(h5, i5), array.get(l5, i5), array.get(c5, i5), ma, na, na)
+                f_wick(eng, true, array.get(t5, i5), array.get(o5, i5), array.get(h5, i5), array.get(l5, i5), array.get(c5, i5), ma, na, na, na)
                 i5 += 1
             while i15 < n15 and array.get(t15, i15) + MS15 <= T3
-                f_wick(eng, false, array.get(t15, i15), array.get(o15, i15), array.get(h15, i15), array.get(l15, i15), array.get(c15, i15), ma, i15 < array.size(r24h) ? array.get(r24h, i15) : na, i15 < array.size(r24l) ? array.get(r24l, i15) : na)
+                f_wick(eng, false, array.get(t15, i15), array.get(o15, i15), array.get(h15, i15), array.get(l15, i15), array.get(c15, i15), ma, i15 < array.size(r24h) ? array.get(r24h, i15) : na, i15 < array.size(r24l) ? array.get(r24l, i15) : na, i15 < array.size(ratr) ? array.get(ratr, i15) : na)
                 i15 += 1
             f_bar3(eng, array.get(t3, i), array.get(o3, i), array.get(h3, i), array.get(l3, i), array.get(c3, i), ma, pdh, pdl)
     // wick candles closing at the end of this bar
     while i5 < n5 and array.get(t5, i5) + MS5 <= nowT
-        f_wick(eng, true, array.get(t5, i5), array.get(o5, i5), array.get(h5, i5), array.get(l5, i5), array.get(c5, i5), ma, na, na)
+        f_wick(eng, true, array.get(t5, i5), array.get(o5, i5), array.get(h5, i5), array.get(l5, i5), array.get(c5, i5), ma, na, na, na)
         i5 += 1
     while i15 < n15 and array.get(t15, i15) + MS15 <= nowT
-        f_wick(eng, false, array.get(t15, i15), array.get(o15, i15), array.get(h15, i15), array.get(l15, i15), array.get(c15, i15), ma, i15 < array.size(r24h) ? array.get(r24h, i15) : na, i15 < array.size(r24l) ? array.get(r24l, i15) : na)
+        f_wick(eng, false, array.get(t15, i15), array.get(o15, i15), array.get(h15, i15), array.get(l15, i15), array.get(c15, i15), ma, i15 < array.size(r24h) ? array.get(r24h, i15) : na, i15 < array.size(r24l) ? array.get(r24l, i15) : na, i15 < array.size(ratr) ? array.get(ratr, i15) : na)
         i15 += 1
 
 // ===== Plots =====
