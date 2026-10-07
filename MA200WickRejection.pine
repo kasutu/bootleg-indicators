@@ -11,7 +11,8 @@
 //    SHORT = prev close below MA, wick trades at/above MA, candle closes back below MA.
 //    The position is placed at the close of the next 3m candle after the wick candle closes.
 //    Optional triple close: wait until the last 3 closed 3m AND 5m candles all closed bullish (long) /
-//    bearish (short), then enter at that 3m close. Cancelled if price closes beyond the wick or it takes too long.
+//    bearish (short) as a reversal off the MA (streak starts at the MA and every close is on the trade side),
+//    then enter at that 3m close. Cancelled if price closes beyond the wick or it takes too long.
 // 4. User lot size. SL at the high/low of the wick candle (+ optional buffer), capped so risk <= Max SL Risk % of balance.
 // 5. 100% TP at the rolling 24h high (long) / low (short), rounded to a whole number toward entry.
 //    If entry is at the 24h extreme (no room), the previous day high/low is used instead.
@@ -47,7 +48,7 @@ smoothType = input.string("None", "Smoothing Type", options=["None", "SMA", "SMA
 smoothLen = input.int(14, "Smoothing Length", minval=1, group="Smoothing", display=display.none)
 bbMult = input.float(2.0, "BB StdDev", minval=0.001, maxval=50, step=0.5, group="Smoothing", display=display.none, tooltip="Only used with SMA + Bollinger Bands.")
 signalLine = input.string("Smoothed MA", "Strategy Uses", options=["Smoothed MA", "Raw MA"], group="Smoothing", display=display.none, tooltip="Which line the touch and wick rules use. Falls back to the raw MA when Smoothing Type is None.")
-needTriple = input.bool(true, "Require Triple Close (3m + 5m)", group="Entry", display=display.none, tooltip="After the wick, wait until the last 3 closed 3m and 5m candles are all bullish (long) or all bearish (short), then enter at that 3m close.")
+needTriple = input.bool(true, "Require Triple Close (3m + 5m)", group="Entry", display=display.none, tooltip="After the wick, wait until the last 3 closed 3m and 5m candles are all bullish (long) or all bearish (short) and reversed off the MA: the streak starts at the MA (its first candle or the one before touched it) and every close is above (long) / below (short) the MA. Then enter at that 3m close.")
 tripleWait = input.int(20, "Max Wait for Triple Close (3m candles)", minval=1, group="Entry", display=display.none, tooltip="Setup is cancelled if the triple close does not happen within this many 3m candles after the wick.")
 wickMode = input.string("5m or 15m", "Wick Confirmation", options=["5m", "15m", "5m or 15m", "5m and 15m"], group="Entry", display=display.none, tooltip="Entry is placed at the close of the next 3m candle after the wick candle.")
 balanceIn = input.float(10000, "Account Balance", minval=1, group="Risk", display=display.none, tooltip="Only used for the max SL risk cap.")
@@ -127,6 +128,42 @@ f_range24() =>
 [r24h, r24l] = f_range24()
 
 // ===== Engine =====
+// Consecutive bullish / bearish closes on one timeframe, and whether the streak is a reversal off the MA
+type Streak
+    int up = 0
+    int dn = 0
+    bool upTouch = false
+    bool dnTouch = false
+    bool upSide = false
+    bool dnSide = false
+    float pl = na
+    float ph = na
+
+f_streak(Streak s, float o, float h, float l, float c, float m) =>
+    if c > o
+        if s.up == 0
+            s.upTouch := l <= m or (not na(s.pl) and s.pl <= m)
+            s.upSide := c > m
+        else
+            s.upSide := s.upSide and c > m
+        s.up := s.up + 1
+    else
+        s.up := 0
+    if c < o
+        if s.dn == 0
+            s.dnTouch := h >= m or (not na(s.ph) and s.ph >= m)
+            s.dnSide := c < m
+        else
+            s.dnSide := s.dnSide and c < m
+        s.dn := s.dn + 1
+    else
+        s.dn := 0
+    s.pl := l
+    s.ph := h
+
+// 3+ closes in direction d that reversed off the MA
+f_reversed(Streak s, int d) => d == 1 ? s.up >= 3 and s.upTouch and s.upSide : s.dn >= 3 and s.dnTouch and s.dnSide
+
 // state: 0 = OFF, 1 = WAIT MA TOUCH, 2 = ARMED, 4 = WICK FOUND, WAIT 3M CLOSE, 3 = IN TRADE
 type Engine
     int state = 0
@@ -147,10 +184,8 @@ type Engine
     float lo24 = na
     int bull5T = na
     int bear5T = na
-    int up3 = 0
-    int dn3 = 0
-    int up5 = 0
-    int dn5 = 0
+    Streak s3
+    Streak s5
     int waited = 0
     int wins = 0
     int losses = 0
@@ -181,9 +216,7 @@ f_wick(Engine e, bool is5, int t, float o, float h, float l, float c, float m, f
     bool sigS = false
     if is5
         e.prev5 := c
-        // consecutive bullish / bearish 5m closes
-        e.up5 := c > o ? e.up5 + 1 : 0
-        e.dn5 := c < o ? e.dn5 + 1 : 0
+        f_streak(e.s5, o, h, l, c, m)
         if bull
             e.bull5T := T
         if bear
@@ -212,9 +245,7 @@ f_wick(Engine e, bool is5, int t, float o, float h, float l, float c, float m, f
 // A closed 3m candle: manage trade, fill pending entry, detect MA touch
 f_bar3(Engine e, int t, float o, float h, float l, float c, float m, float pdhV, float pdlV) =>
     T = t + MS3
-    // consecutive bullish / bearish 3m closes
-    e.up3 := c > o ? e.up3 + 1 : 0
-    e.dn3 := c < o ? e.dn3 + 1 : 0
+    f_streak(e.s3, o, h, l, c, m)
     // keep the 24h range current between 15m closes
     e.hi24 := na(e.hi24) ? na : math.max(e.hi24, h)
     e.lo24 := na(e.lo24) ? na : math.min(e.lo24, l)
@@ -252,7 +283,7 @@ f_bar3(Engine e, int t, float o, float h, float l, float c, float m, float pdhV,
     else if e.state == 4 and T > e.pT
         d = e.pDir
         e.waited := e.waited + 1
-        tripleOk = not needTriple or (d == 1 ? e.up3 >= 3 and e.up5 >= 3 : e.dn3 >= 3 and e.dn5 >= 3)
+        tripleOk = not needTriple or (f_reversed(e.s3, d) and f_reversed(e.s5, d))
         beyondWick = d == 1 ? c <= e.pSl : c >= e.pSl
         tp24 = d == 1 ? f_whole(e.hi24, wholeStep, true) : f_whole(e.lo24, wholeStep, false)
         tpPd = d == 1 ? f_whole(pdhV, wholeStep, true) : f_whole(pdlV, wholeStep, false)
@@ -265,7 +296,7 @@ f_bar3(Engine e, int t, float o, float h, float l, float c, float m, float pdhV,
         if not tripleOk
             if beyondWick or e.waited >= tripleWait
                 e.state := 2
-                f_skip(T, c, d, beyondWick ? "closed beyond the wick before the triple close" : "no 3m + 5m triple close within " + str.tostring(tripleWait) + " 3m candles")
+                f_skip(T, c, d, beyondWick ? "closed beyond the wick before the triple close" : "no 3m + 5m triple close reversing off the MA within " + str.tostring(tripleWait) + " 3m candles")
         // 3m close back through the wick or no room to the target -> skip and stay armed
         else if rawDist <= 0 or not validTp
             e.state := 2
@@ -296,7 +327,7 @@ f_bar3(Engine e, int t, float o, float h, float l, float c, float m, float pdhV,
         e.state := 2
     e.prev3 := c
 
-var Engine eng = Engine.new()
+var Engine eng = Engine.new(s3=Streak.new(), s5=Streak.new())
 eng.evLong := false
 eng.evShort := false
 eng.evExit := false
