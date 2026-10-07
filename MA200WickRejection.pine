@@ -6,14 +6,15 @@
 // 1. 1H SMA(200) computed on LOW prices.
 // 2. Manual toggle "Strategy Active" (or Auto mode). When ON, waits for price to touch / pass the 1H MA (ARMED).
 //    One trade per touch: after a trade closes, price must leave the MA and touch it again.
-// 3. Entry on a 5m and/or 15m wick rejection of the MA:
-//    LONG  = prev close above MA, wick trades at/below MA, candle closes back above MA.
-//    SHORT = prev close below MA, wick trades at/above MA, candle closes back below MA.
-//    The position is placed at the close of the next 3m candle after the wick candle closes.
-//    Optional triple close: wait until the last 3 closed 3m AND 5m candles all closed bullish (long) /
-//    bearish (short) as a reversal off the MA (streak starts at the MA and every close is on the trade side),
-//    then enter at that 3m close. Cancelled if price closes beyond the wick or it takes too long.
-// 4. User lot size. SL at the high/low of the wick candle (+ optional buffer), capped so risk <= Max SL Risk % of balance.
+// 3. Entry when ARMED on either trigger (OR):
+//    a) Wick rejection on 5m and/or 15m, entered at the close of the next 3m candle:
+//       LONG  = prev close above MA, wick trades at/below MA, candle closes back above MA.
+//       SHORT = prev close below MA, wick trades at/above MA, candle closes back below MA.
+//       SL at the high/low of the wick candle.
+//    b) Triple close reversal: the last 3+ closed 3m AND 5m candles all closed bullish (long) / bearish (short),
+//       the run starts at the MA (its first candle or the one before touched it) and every close is on the
+//       trade side of the MA. Entered at that 3m close. SL at the run's extreme low (long) / high (short).
+// 4. User lot size. SL (+ optional buffer) capped so risk <= Max SL Risk % of balance.
 // 5. 100% TP at the rolling 24h high (long) / low (short), rounded to a whole number toward entry.
 //    If entry is at the 24h extreme (no room), the previous day high/low is used instead.
 // 6. SL moves to break-even once 1R is reached.
@@ -48,9 +49,9 @@ smoothType = input.string("None", "Smoothing Type", options=["None", "SMA", "SMA
 smoothLen = input.int(14, "Smoothing Length", minval=1, group="Smoothing", display=display.none)
 bbMult = input.float(2.0, "BB StdDev", minval=0.001, maxval=50, step=0.5, group="Smoothing", display=display.none, tooltip="Only used with SMA + Bollinger Bands.")
 signalLine = input.string("Smoothed MA", "Strategy Uses", options=["Smoothed MA", "Raw MA"], group="Smoothing", display=display.none, tooltip="Which line the touch and wick rules use. Falls back to the raw MA when Smoothing Type is None.")
-needTriple = input.bool(true, "Require Triple Close (3m + 5m)", group="Entry", display=display.none, tooltip="After the wick, wait until the last 3 closed 3m and 5m candles are all bullish (long) or all bearish (short) and reversed off the MA: the streak starts at the MA (its first candle or the one before touched it) and every close is above (long) / below (short) the MA. Then enter at that 3m close.")
-tripleWait = input.int(20, "Max Wait for Triple Close (3m candles)", minval=1, group="Entry", display=display.none, tooltip="Setup is cancelled if the triple close does not happen within this many 3m candles after the wick.")
-wickMode = input.string("5m or 15m", "Wick Confirmation", options=["5m", "15m", "5m or 15m", "5m and 15m"], group="Entry", display=display.none, tooltip="Entry is placed at the close of the next 3m candle after the wick candle.")
+useWick = input.bool(true, "Entry: Wick Rejection (5m / 15m)", group="Entry", display=display.none, tooltip="Wick rejection of the MA on 5m and/or 15m, entered at the close of the next 3m candle. SL at the wick candle high/low.")
+useTriple = input.bool(true, "Entry: Triple Close Reversal (3m + 5m)", group="Entry", display=display.none, tooltip="The last 3 closed 3m and 5m candles are all bullish (long) or all bearish (short) and reversed off the MA: the run starts at the MA (its first candle or the one before touched it) and every close is above (long) / below (short) the MA. Entered at that 3m close. SL at the run's extreme.")
+wickMode = input.string("5m or 15m", "Wick Timeframe", options=["5m", "15m", "5m or 15m", "5m and 15m"], group="Entry", display=display.none, tooltip="Which wick candles count for the wick rejection entry.")
 balanceIn = input.float(10000, "Account Balance", minval=1, group="Risk", display=display.none, tooltip="Only used for the max SL risk cap.")
 lots = input.float(0.10, "Lot Size", minval=0.01, step=0.01, group="Risk", display=display.none)
 contractIn = input.float(0, "Contract Size (0 = auto)", minval=0, group="Risk", display=display.none, tooltip="MT5 SYMBOL_TRADE_CONTRACT_SIZE. 0 = auto: XAU 100, XAG 5000, forex 100000, others 1. Only used for the max SL risk cap.")
@@ -136,6 +137,8 @@ type Streak
     bool dnTouch = false
     bool upSide = false
     bool dnSide = false
+    float upLow = na
+    float dnHigh = na
     float pl = na
     float ph = na
 
@@ -144,8 +147,10 @@ f_streak(Streak s, float o, float h, float l, float c, float m) =>
         if s.up == 0
             s.upTouch := l <= m or (not na(s.pl) and s.pl <= m)
             s.upSide := c > m
+            s.upLow := na(s.pl) ? l : math.min(l, s.pl)
         else
             s.upSide := s.upSide and c > m
+            s.upLow := math.min(s.upLow, l)
         s.up := s.up + 1
     else
         s.up := 0
@@ -153,8 +158,10 @@ f_streak(Streak s, float o, float h, float l, float c, float m) =>
         if s.dn == 0
             s.dnTouch := h >= m or (not na(s.ph) and s.ph >= m)
             s.dnSide := c < m
+            s.dnHigh := na(s.ph) ? h : math.max(h, s.ph)
         else
             s.dnSide := s.dnSide and c < m
+            s.dnHigh := math.max(s.dnHigh, h)
         s.dn := s.dn + 1
     else
         s.dn := 0
@@ -186,7 +193,8 @@ type Engine
     int bear5T = na
     Streak s3
     Streak s5
-    int waited = 0
+    bool tripL = false
+    bool tripS = false
     int wins = 0
     int losses = 0
     int bes = 0
@@ -199,12 +207,47 @@ type Engine
     bool evShort = false
     bool evExit = false
 
-// Grey x on a wick that did not become a trade, reason in the tooltip
+// Grey x on a setup that did not become a trade, reason in the tooltip
 f_skip(int T, float y, int d, string why) =>
     if showSkips
-        label.new(T, y, "x", xloc=xloc.bar_time, color=color.new(color.gray, 100), textcolor=color.gray, style=d == 1 ? label.style_label_up : label.style_label_down, size=size.tiny, tooltip=(d == 1 ? "Long" : "Short") + " wick skipped: " + why)
+        label.new(T, y, "x", xloc=xloc.bar_time, color=color.new(color.gray, 100), textcolor=color.gray, style=d == 1 ? label.style_label_up : label.style_label_down, size=size.tiny, tooltip=(d == 1 ? "Long" : "Short") + " setup skipped - " + why)
 
 f_whole(p, step, down) => step > 0 ? (down ? math.floor(p / step) * step : math.ceil(p / step) * step) : p
+
+f_why(Engine e) => e.state == 3 ? "a trade is still open" : e.state == 4 ? "already waiting for a 3m entry" : e.state == 0 ? "strategy off / outside lookback" : e.state == 1 ? (e.fresh ? "not armed yet (no MA touch since activation)" : "not armed (needs a fresh MA touch after the last trade)") : "daily trade limit reached"
+
+// Open a position at close c with stop slRaw; returns true when opened
+f_open(Engine e, int d, int T, float c, float slRaw, float pdhV, float pdlV, string trig) =>
+    tp24 = d == 1 ? f_whole(e.hi24, wholeStep, true) : f_whole(e.lo24, wholeStep, false)
+    tpPd = d == 1 ? f_whole(pdhV, wholeStep, true) : f_whole(pdlV, wholeStep, false)
+    ok24 = not na(tp24) and (d == 1 ? tp24 > c : tp24 < c)
+    // entry at the 24h extreme -> fall back to the previous day high/low
+    tp0 = ok24 ? tp24 : tpPd
+    rawDist = d == 1 ? c - slRaw : slRaw - c
+    validTp = not na(tp0) and (d == 1 ? tp0 > c : tp0 < c)
+    bool opened = false
+    if rawDist <= 0 or not validTp
+        f_skip(T, c, d, trig + ": " + (rawDist <= 0 ? "entry closed beyond the stop (no room for SL)" : "no room to the 24h / prev day target"))
+    else
+        dist = math.min(rawDist, maxDist)
+        e.state := 3
+        e.dir := d
+        e.entry := c
+        e.sl := c - d * dist
+        e.tp := tp0
+        e.risk := dist
+        e.be := false
+        e.beLn := na
+        e.evLong := d == 1
+        e.evShort := d == -1
+        e.dayTrades := e.dayTrades + 1
+        opened := true
+        // Long / Short Position tool style: green profit zone, red loss zone
+        e.tpBox := box.new(T, math.max(c, tp0), T, math.min(c, tp0), xloc=xloc.bar_time, border_color=color.new(color.green, 60), bgcolor=color.new(color.green, 85))
+        e.slBox := box.new(T, math.max(c, e.sl), T, math.min(c, e.sl), xloc=xloc.bar_time, border_color=color.new(color.red, 60), bgcolor=color.new(color.red, 85))
+        tip = "Trigger: " + trig + "\nEntry (3m close): " + str.tostring(c, format.mintick) + "\nSL: " + str.tostring(e.sl, format.mintick) + (rawDist > maxDist ? " (capped at " + str.tostring(maxRiskPct) + "% risk)" : "") + "\nTP: " + str.tostring(tp0, format.mintick) + (ok24 ? " (24h)" : " (prev day)") + "\nRR: " + str.tostring(math.abs(tp0 - c) / dist, "#.##") + "\nLots: " + str.tostring(lots)
+        label.new(T, c, d == 1 ? "L" : "S", xloc=xloc.bar_time, color=color.new(color.blue, 20), textcolor=color.white, style=label.style_label_right, size=size.tiny, tooltip=tip)
+    opened
 
 // A closed 5m / 15m candle: wick rejection check
 f_wick(Engine e, bool is5, int t, float o, float h, float l, float c, float m, float rh, float rl) =>
@@ -221,25 +264,23 @@ f_wick(Engine e, bool is5, int t, float o, float h, float l, float c, float m, f
             e.bull5T := T
         if bear
             e.bear5T := T
-        sigL := use5 and bull
-        sigS := use5 and bear
+        sigL := useWick and use5 and bull
+        sigS := useWick and use5 and bear
     else
         e.prev15 := c
         e.hi24 := rh
         e.lo24 := rl
-        sigL := (use15 and bull) or (both and bull and e.bull5T == T)
-        sigS := (use15 and bear) or (both and bear and e.bear5T == T)
+        sigL := useWick and ((use15 and bull) or (both and bull and e.bull5T == T))
+        sigS := useWick and ((use15 and bear) or (both and bear and e.bear5T == T))
     dayFull = maxPerDay > 0 and e.dayTrades >= maxPerDay
     if sigL != sigS and (e.state != 2 or dayFull)
         d = sigL ? 1 : -1
-        why = e.state == 3 ? "a trade is still open" : e.state == 4 ? "already waiting for a 3m entry" : e.state == 0 ? "strategy off / outside lookback" : e.state == 1 ? (e.fresh ? "not armed yet (no MA touch since activation)" : "not armed (needs a fresh MA touch after the last trade)") : "daily trade limit reached"
-        f_skip(T, d == 1 ? l : h, d, why)
+        f_skip(T, d == 1 ? l : h, d, "wick: " + f_why(e))
     if e.state == 2 and sigL != sigS and not dayFull
         d = sigL ? 1 : -1
         e.pSl := (d == 1 ? l : h) - d * slBuffer
         e.pDir := d
         e.pT := T
-        e.waited := 0
         e.state := 4
 
 // A closed 3m candle: manage trade, fill pending entry, detect MA touch
@@ -281,44 +322,24 @@ f_bar3(Engine e, int t, float o, float h, float l, float c, float m, float pdhV,
             e.fresh := false
             e.evExit := true
     else if e.state == 4 and T > e.pT
-        d = e.pDir
-        e.waited := e.waited + 1
-        tripleOk = not needTriple or (f_reversed(e.s3, d) and f_reversed(e.s5, d))
-        beyondWick = d == 1 ? c <= e.pSl : c >= e.pSl
-        tp24 = d == 1 ? f_whole(e.hi24, wholeStep, true) : f_whole(e.lo24, wholeStep, false)
-        tpPd = d == 1 ? f_whole(pdhV, wholeStep, true) : f_whole(pdlV, wholeStep, false)
-        ok24 = not na(tp24) and (d == 1 ? tp24 > c : tp24 < c)
-        // entry at the 24h extreme -> fall back to the previous day high/low
-        tp0 = ok24 ? tp24 : tpPd
-        rawDist = d == 1 ? c - e.pSl : e.pSl - c
-        validTp = not na(tp0) and (d == 1 ? tp0 > c : tp0 < c)
-        // waiting for the triple close: cancel if price closes beyond the wick or it takes too long
-        if not tripleOk
-            if beyondWick or e.waited >= tripleWait
-                e.state := 2
-                f_skip(T, c, d, beyondWick ? "closed beyond the wick before the triple close" : "no 3m + 5m triple close reversing off the MA within " + str.tostring(tripleWait) + " 3m candles")
-        // 3m close back through the wick or no room to the target -> skip and stay armed
-        else if rawDist <= 0 or not validTp
+        // wick entry: next 3m close after the wick candle
+        if not f_open(e, e.pDir, T, c, e.pSl, pdhV, pdlV, "wick")
             e.state := 2
-            f_skip(T, c, d, rawDist <= 0 ? "3m entry candle closed beyond the wick (no room for SL)" : "no room to the 24h / prev day target")
-        else
-            dist = math.min(rawDist, maxDist)
-            e.state := 3
-            e.dir := d
-            e.entry := c
-            e.sl := c - d * dist
-            e.tp := tp0
-            e.risk := dist
-            e.be := false
-            e.beLn := na
-            e.evLong := d == 1
-            e.evShort := d == -1
-            e.dayTrades := e.dayTrades + 1
-            // Long / Short Position tool style: green profit zone, red loss zone
-            e.tpBox := box.new(T, math.max(c, tp0), T, math.min(c, tp0), xloc=xloc.bar_time, border_color=color.new(color.green, 60), bgcolor=color.new(color.green, 85))
-            e.slBox := box.new(T, math.max(c, e.sl), T, math.min(c, e.sl), xloc=xloc.bar_time, border_color=color.new(color.red, 60), bgcolor=color.new(color.red, 85))
-            tip = "Entry (3m close): " + str.tostring(c, format.mintick) + "\nSL: " + str.tostring(e.sl, format.mintick) + (rawDist > maxDist ? " (capped at " + str.tostring(maxRiskPct) + "% risk)" : "") + "\nTP: " + str.tostring(tp0, format.mintick) + (ok24 ? " (24h)" : " (prev day)") + "\nRR: " + str.tostring(math.abs(tp0 - c) / dist, "#.##") + "\nLots: " + str.tostring(lots)
-            label.new(T, c, d == 1 ? "L" : "S", xloc=xloc.bar_time, color=color.new(color.blue, 20), textcolor=color.white, style=label.style_label_right, size=size.tiny, tooltip=tip)
+    // triple close reversal entry: fires once when the 3m + 5m run first qualifies
+    tripL = useTriple and f_reversed(e.s3, 1) and f_reversed(e.s5, 1)
+    tripS = useTriple and f_reversed(e.s3, -1) and f_reversed(e.s5, -1)
+    newL = tripL and not e.tripL
+    newS = tripS and not e.tripS
+    e.tripL := tripL
+    e.tripS := tripS
+    if newL != newS
+        d = newL ? 1 : -1
+        dayFull = maxPerDay > 0 and e.dayTrades >= maxPerDay
+        if e.state == 2 and not dayFull
+            slRaw = (d == 1 ? math.min(e.s3.upLow, e.s5.upLow) : math.max(e.s3.dnHigh, e.s5.dnHigh)) - d * slBuffer
+            f_open(e, d, T, c, slRaw, pdhV, pdlV, "triple close")
+        else if e.state != 3 or e.dir != d
+            f_skip(T, c, d, "triple close: " + f_why(e))
     // Touch / pass of the MA; a fresh touch is needed after each trade
     touch = (l <= m and h >= m) or (not na(e.prev3) and ((l > m and e.prev3 < m) or (h < m and e.prev3 > m)))
     if not touch
@@ -400,7 +421,7 @@ f_row(r, k, v, c) =>
 if showTable and barstate.islast
     st = eng.state
     dayFull = maxPerDay > 0 and eng.dayTrades >= maxPerDay
-    statusTxt = not tfOk ? "USE 3m - 1H CHART" : st == 0 ? "OFF" : (st == 1 or st == 2) and dayFull ? "DAILY LIMIT REACHED" : st == 1 ? "WAITING 1H MA TOUCH" : st == 2 ? "ARMED - WAIT WICK" : st == 4 ? (needTriple ? "WICK - WAIT TRIPLE CLOSE" : "WICK - WAIT 3M CLOSE") : eng.dir == 1 ? "IN LONG" : "IN SHORT"
+    statusTxt = not tfOk ? "USE 3m - 1H CHART" : st == 0 ? "OFF" : (st == 1 or st == 2) and dayFull ? "DAILY LIMIT REACHED" : st == 1 ? "WAITING 1H MA TOUCH" : st == 2 ? "ARMED - WAIT ENTRY" : st == 4 ? "WICK - WAIT 3M CLOSE" : eng.dir == 1 ? "IN LONG" : "IN SHORT"
     statusCol = st == 3 ? color.aqua : st == 2 or st == 4 ? color.yellow : st == 1 ? color.white : color.gray
     decided = eng.wins + eng.losses
     winRate = decided > 0 ? eng.wins * 100.0 / decided : 0.0
