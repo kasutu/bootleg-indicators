@@ -14,7 +14,7 @@
 //    b) Triple close reversal: the last 3+ closed 3m AND 5m candles all closed bullish (long) / bearish (short),
 //       the run starts at the MA (its first candle or the one before touched it) and every close is on the
 //       trade side of the MA. Entered at that 3m close. SL at the run's extreme low (long) / high (short).
-// 4. User lot size. SL (+ optional buffer) capped so risk <= Max SL Risk % of balance.
+// 4. User lot size. SL as set by the entry trigger (+ optional buffer), no risk cap.
 // 5. 100% TP at the rolling 24h high (long) / low (short), rounded to a whole number toward entry.
 //    If entry is at the 24h extreme (no room), the previous day high/low is used instead.
 // 6. SL moves to break-even once 1R is reached.
@@ -32,7 +32,6 @@
 // MA notes : create the iMA handle once in OnInit, check BarsCalculated before CopyBuffer, IndicatorRelease in OnDeinit
 // Risk     : lossPerLot = (slDist / SYMBOL_TRADE_TICK_SIZE) * SYMBOL_TRADE_TICK_VALUE_LOSS
 //            or OrderCalcProfit(type, _Symbol, lots, entry, sl, loss) (EA/script only, already in deposit currency)
-//            Contract Size input below = SYMBOL_TRADE_CONTRACT_SIZE
 // Lots     : normalize with SYMBOL_VOLUME_MIN / SYMBOL_VOLUME_STEP / SYMBOL_VOLUME_MAX, OrderCheck before OrderSend
 // BE       : CTrade.PositionModify(ticket, entryPrice, tp), only if price is beyond SYMBOL_TRADE_STOPS_LEVEL
 //            and SYMBOL_TRADE_FREEZE_LEVEL (points) from the current price
@@ -52,11 +51,8 @@ signalLine = input.string("Smoothed MA", "Strategy Uses", options=["Smoothed MA"
 useWick = input.bool(true, "Entry: Wick Rejection (5m / 15m)", group="Entry", display=display.none, tooltip="Wick rejection of the MA on 5m and/or 15m, entered at the close of the next 3m candle. SL at the wick candle high/low.")
 useTriple = input.bool(true, "Entry: Triple Close Reversal (3m + 5m)", group="Entry", display=display.none, tooltip="The last 3 closed 3m and 5m candles are all bullish (long) or all bearish (short) and reversed off the MA: the run starts at the MA (its first candle or the one before touched it) and every close is above (long) / below (short) the MA. Entered at that 3m close. SL at the run's extreme.")
 wickMode = input.string("5m or 15m", "Wick Timeframe", options=["5m", "15m", "5m or 15m", "5m and 15m"], group="Entry", display=display.none, tooltip="Which wick candles count for the wick rejection entry.")
-balanceIn = input.float(10000, "Account Balance", minval=1, group="Risk", display=display.none, tooltip="Only used for the max SL risk cap.")
 lots = input.float(0.10, "Lot Size", minval=0.01, step=0.01, group="Risk", display=display.none)
-contractIn = input.float(0, "Contract Size (0 = auto)", minval=0, group="Risk", display=display.none, tooltip="MT5 SYMBOL_TRADE_CONTRACT_SIZE. 0 = auto: XAU 100, XAG 5000, forex 100000, others 1. Only used for the max SL risk cap.")
 slBuffer = input.float(0, "SL Buffer (price) beyond wick", minval=0, group="Risk", display=display.none, tooltip="Extra distance added beyond the wick candle high/low. Eg. 0.5 = 50 cents on gold.")
-maxRiskPct = input.float(30, "Max SL Risk % of Balance", minval=0.1, maxval=100, group="Risk", display=display.none)
 wholeStep = input.float(1.0, "Whole Number Step", minval=0, group="Targets", display=display.none, tooltip="TP = rolling 24h high/low rounded to this step toward entry. 1.0 for gold, 0.01 for EURUSD. 0 = no rounding.")
 beRR = input.float(1.0, "Move SL to BE at RR", minval=0.1, step=0.1, group="Targets", display=display.none)
 showPD = input.bool(false, "Show 24h High/Low", group="Display", display=display.none)
@@ -70,9 +66,6 @@ MS15 = 900000
 use5 = wickMode == "5m" or wickMode == "5m or 15m"
 use15 = wickMode == "15m" or wickMode == "5m or 15m"
 both = wickMode == "5m and 15m"
-autoContract = str.contains(syminfo.ticker, "XAU") ? 100.0 : str.contains(syminfo.ticker, "XAG") ? 5000.0 : syminfo.type == "forex" ? 100000.0 : 1.0
-contractSize = contractIn > 0 ? contractIn : autoContract
-maxDist = (balanceIn * maxRiskPct / 100) / (lots * contractSize)
 chartSec = timeframe.in_seconds()
 tfOk = timeframe.isintraday and chartSec >= 180 and chartSec <= 3600
 
@@ -229,7 +222,7 @@ f_open(Engine e, int d, int T, float c, float slRaw, float pdhV, float pdlV, str
     if rawDist <= 0 or not validTp
         f_skip(T, c, d, trig + ": " + (rawDist <= 0 ? "entry closed beyond the stop (no room for SL)" : "no room to the 24h / prev day target"))
     else
-        dist = math.min(rawDist, maxDist)
+        dist = rawDist
         e.state := 3
         e.dir := d
         e.entry := c
@@ -245,7 +238,7 @@ f_open(Engine e, int d, int T, float c, float slRaw, float pdhV, float pdlV, str
         // Long / Short Position tool style: green profit zone, red loss zone
         e.tpBox := box.new(T, math.max(c, tp0), T, math.min(c, tp0), xloc=xloc.bar_time, border_color=color.new(color.green, 60), bgcolor=color.new(color.green, 85))
         e.slBox := box.new(T, math.max(c, e.sl), T, math.min(c, e.sl), xloc=xloc.bar_time, border_color=color.new(color.red, 60), bgcolor=color.new(color.red, 85))
-        tip = "Trigger: " + trig + "\nEntry (3m close): " + str.tostring(c, format.mintick) + "\nSL: " + str.tostring(e.sl, format.mintick) + (rawDist > maxDist ? " (capped at " + str.tostring(maxRiskPct) + "% risk)" : "") + "\nTP: " + str.tostring(tp0, format.mintick) + (ok24 ? " (24h)" : " (prev day)") + "\nRR: " + str.tostring(math.abs(tp0 - c) / dist, "#.##") + "\nLots: " + str.tostring(lots)
+        tip = "Trigger: " + trig + "\nEntry (3m close): " + str.tostring(c, format.mintick) + "\nSL: " + str.tostring(e.sl, format.mintick) + "\nTP: " + str.tostring(tp0, format.mintick) + (ok24 ? " (24h)" : " (prev day)") + "\nRR: " + str.tostring(math.abs(tp0 - c) / dist, "#.##") + "\nLots: " + str.tostring(lots)
         label.new(T, c, d == 1 ? "L" : "S", xloc=xloc.bar_time, color=color.new(color.blue, 20), textcolor=color.white, style=label.style_label_right, size=size.tiny, tooltip=tip)
     opened
 
