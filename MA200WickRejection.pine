@@ -37,9 +37,9 @@ smoothLen = input.int(14, "Smoothing Length", minval=1, group="Smoothing")
 bbMult = input.float(2.0, "BB StdDev", minval=0.001, maxval=50, step=0.5, group="Smoothing", tooltip="Only used with SMA + Bollinger Bands.")
 signalLine = input.string("Smoothed MA", "Strategy Uses", options=["Smoothed MA", "Raw MA"], group="Smoothing", tooltip="Which line the touch and wick rules use. Falls back to the raw MA when Smoothing Type is None.")
 wickMode = input.string("5m or 15m", "Wick Confirmation", options=["5m", "15m", "5m or 15m", "5m and 15m"], group="Entry")
-balanceIn = input.float(10000, "Account Balance", minval=1, group="Risk")
+balanceIn = input.float(10000, "Account Balance", minval=1, group="Risk", tooltip="Only used for the max SL risk cap.")
 lots = input.float(0.10, "Lot Size", minval=0.01, step=0.01, group="Risk")
-contractSize = input.float(100000, "Contract Size (units per lot)", minval=0.0001, group="Risk", tooltip="MT5 SYMBOL_TRADE_CONTRACT_SIZE. Forex = 100000, XAUUSD = 100, many indices = 1. P/L assumes account currency = quote currency.")
+contractSize = input.float(100000, "Contract Size (units per lot)", minval=0.0001, group="Risk", tooltip="MT5 SYMBOL_TRADE_CONTRACT_SIZE. Forex = 100000, XAUUSD = 100, many indices = 1. Only used for the max SL risk cap (assumes account currency = quote currency).")
 maxRiskPct = input.float(30, "Max SL Risk % of Balance", minval=0.1, maxval=100, group="Risk")
 wholeStep = input.float(1.0, "Whole Number Step", minval=0, group="Targets", tooltip="TP = prev day high/low rounded to this step toward entry. 1.0 for gold, 0.01 for EURUSD. 0 = no rounding.")
 beRR = input.float(1.0, "Move SL to BE at RR", minval=0.1, step=0.1, group="Targets")
@@ -110,8 +110,6 @@ var bool beDone = false
 var int wins = 0
 var int losses = 0
 var int bes = 0
-var float balance = balanceIn
-var float netPnl = 0.0
 var line entryLn = na
 var line slLn = na
 var box tpBox = na
@@ -144,7 +142,7 @@ if state == 2 and longSig != shortSig
     else
         rawSl := useBoth5 and useBoth15 ? math.max(h5, h15) : useBoth5 ? h5 : h15
     tp0 = d == 1 ? f_whole(pdh, wholeStep, true) : f_whole(pdl, wholeStep, false)
-    maxDist = (balance * maxRiskPct / 100) / (lots * contractSize)
+    maxDist = (balanceIn * maxRiskPct / 100) / (lots * contractSize)
     rawDist = math.abs(ep - rawSl)
     capped = rawDist > maxDist
     dist = math.min(rawDist, maxDist)
@@ -161,12 +159,10 @@ if state == 2 and longSig != shortSig
         enteredShort := d == -1
         entryLn := line.new(bar_index, entryPx, bar_index, entryPx, color=color.blue, width=2)
         slLn := na
-        riskMoney = dist * lots * contractSize
-        rewardMoney = math.abs(tpPx - entryPx) * lots * contractSize
         rr = math.abs(tpPx - entryPx) / dist
         // Long / Short Position tool style: green profit zone, red loss zone
-        tpTxt = "Target: " + str.tostring(tpPx, format.mintick) + " (" + str.tostring(math.abs(tpPx - entryPx) / entryPx * 100, "#.##") + "%) Amount: " + str.tostring(rewardMoney, "#.##")
-        slTxt = "Stop: " + str.tostring(slPx, format.mintick) + " (" + str.tostring(dist / entryPx * 100, "#.##") + "%) Amount: " + str.tostring(riskMoney, "#.##")
+        tpTxt = "Target: " + str.tostring(tpPx, format.mintick) + " (" + str.tostring(math.abs(tpPx - entryPx) / entryPx * 100, "#.##") + "%)"
+        slTxt = "Stop: " + str.tostring(slPx, format.mintick) + " (" + str.tostring(dist / entryPx * 100, "#.##") + "%)"
         tpBox := box.new(bar_index, math.max(entryPx, tpPx), bar_index + 1, math.min(entryPx, tpPx), border_color=color.new(color.green, 30), bgcolor=color.new(color.green, 80), text=tpTxt, text_color=color.white, text_size=size.small, text_halign=text.align_left, text_valign=d == 1 ? text.align_top : text.align_bottom)
         slBox := box.new(bar_index, math.max(entryPx, slPx), bar_index + 1, math.min(entryPx, slPx), border_color=color.new(color.red, 30), bgcolor=color.new(color.red, 80), text=slTxt, text_color=color.white, text_size=size.small, text_halign=text.align_left, text_valign=d == 1 ? text.align_bottom : text.align_top)
         txt = (d == 1 ? "LONG " : "SHORT ") + str.tostring(entryPx, format.mintick) + "\nQty: " + str.tostring(lots) + " lots | Risk/Reward Ratio: " + str.tostring(rr, "#.##") + (capped ? "\nSL capped at " + str.tostring(maxRiskPct) + "% risk" : "")
@@ -200,9 +196,6 @@ exitWin = res == "WIN"
 exitLoss = res == "LOSS"
 exitBe = res == "BE"
 if not na(exitPx)
-    pnl = dir * (exitPx - entryPx) * lots * contractSize
-    balance += pnl
-    netPnl += pnl
     if exitWin
         wins += 1
     else if exitLoss
@@ -210,7 +203,7 @@ if not na(exitPx)
     else
         bes += 1
     exitCol = exitWin ? color.green : exitLoss ? color.red : color.orange
-    label.new(bar_index, exitPx, res + " " + (pnl >= 0 ? "+" : "") + str.tostring(pnl, "#.##"), color=exitCol, textcolor=color.white, style=dir == 1 ? (exitWin ? label.style_label_down : label.style_label_up) : (exitWin ? label.style_label_up : label.style_label_down), size=size.small)
+    label.new(bar_index, exitPx, res, color=exitCol, textcolor=color.white, style=dir == 1 ? (exitWin ? label.style_label_down : label.style_label_up) : (exitWin ? label.style_label_up : label.style_label_down), size=size.small)
     state := enabled ? 1 : 0
     dir := 0
 
@@ -229,7 +222,7 @@ alertcondition(enteredShort, "Short Entry", "MA200 Wick: SHORT entry")
 alertcondition(exitWin or exitLoss or exitBe, "Trade Exit", "MA200 Wick: trade closed")
 
 // ===== Stats table =====
-var table tbl = table.new(position.top_right, 2, 10, bgcolor=color.new(color.black, 20), border_width=1, border_color=color.gray)
+var table tbl = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 20), border_width=1, border_color=color.gray)
 f_row(r, k, v, c) =>
     table.cell(tbl, 0, r, k, text_color=color.white, text_size=size.small, text_halign=text.align_left)
     table.cell(tbl, 1, r, v, text_color=c, text_size=size.small, text_halign=text.align_right)
@@ -248,5 +241,3 @@ if showTable and barstate.islast
     f_row(5, "Break-even", str.tostring(bes), color.orange)
     f_row(6, "Win Rate", str.tostring(winRate, "#.#") + "%", winRate >= 50 ? color.green : color.red)
     f_row(7, "Win/Loss Ratio", str.tostring(wlRatio, "#.##"), wlRatio >= 1 ? color.green : color.red)
-    f_row(8, "Net P/L", str.tostring(netPnl, "#.##"), netPnl >= 0 ? color.green : color.red)
-    f_row(9, "Balance", str.tostring(balance, "#.##"), color.white)
