@@ -25,7 +25,7 @@
 // Lots     : normalize with SYMBOL_VOLUME_MIN / SYMBOL_VOLUME_STEP / SYMBOL_VOLUME_MAX, OrderCheck before OrderSend
 // BE       : CTrade.PositionModify(ticket, entryPrice, tp), only if price is beyond SYMBOL_TRADE_STOPS_LEVEL
 //            and SYMBOL_TRADE_FREEZE_LEVEL (points) from the current price
-indicator("MA200 Wick Rejection [kasutufx]", shorttitle="MA200 Wick", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
+indicator("MA200 Wick Rejection [kasutufx]", shorttitle="MA200 Wick", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500, behind_chart=false)
 
 // ===== Inputs =====
 mode = input.string("Manual", "Mode", options=["Manual", "Auto"], group="Control", display=display.none, tooltip="Manual = uses the toggle and Active From date. Auto = always on across all chart history, re-arms after every trade.")
