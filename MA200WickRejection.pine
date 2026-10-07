@@ -24,7 +24,7 @@
 // Lots     : normalize with SYMBOL_VOLUME_MIN / SYMBOL_VOLUME_STEP / SYMBOL_VOLUME_MAX, OrderCheck before OrderSend
 // BE       : CTrade.PositionModify(ticket, entryPrice, tp), only if price is beyond SYMBOL_TRADE_STOPS_LEVEL
 //            and SYMBOL_TRADE_FREEZE_LEVEL (points) from the current price
-indicator("MA200 Wick Rejection [kasutufx]", shorttitle="MA200 Wick", overlay=true, max_lines_count=500, max_labels_count=500)
+indicator("MA200 Wick Rejection [kasutufx]", shorttitle="MA200 Wick", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
 
 // ===== Inputs =====
 active = input.bool(true, "Strategy Active (manual toggle)", group="Control")
@@ -91,7 +91,8 @@ var float balance = balanceIn
 var float netPnl = 0.0
 var line entryLn = na
 var line slLn = na
-var line tpLn = na
+var box tpBox = na
+var box slBox = na
 
 enabled = active and time >= startTime and tfOk and not na(ma)
 
@@ -135,14 +136,17 @@ if state == 2 and longSig != shortSig
         enteredLong := d == 1
         enteredShort := d == -1
         entryLn := line.new(bar_index, entryPx, bar_index, entryPx, color=color.blue, width=2)
-        slLn := line.new(bar_index, slPx, bar_index, slPx, color=color.red, width=2)
-        tpLn := line.new(bar_index, tpPx, bar_index, tpPx, color=color.green, width=2)
+        slLn := na
         riskMoney = dist * lots * contractSize
+        rewardMoney = math.abs(tpPx - entryPx) * lots * contractSize
         rr = math.abs(tpPx - entryPx) / dist
-        txt = (d == 1 ? "LONG" : "SHORT") + "\nENTRY " + str.tostring(entryPx, format.mintick) + "\nSL " + str.tostring(slPx, format.mintick) + (capped ? " (capped)" : "") + "\nTP " + str.tostring(tpPx, format.mintick) + "\nLots " + str.tostring(lots) + " | Risk " + str.tostring(riskMoney, "#.##") + " | RR " + str.tostring(rr, "#.##")
-        label.new(bar_index, entryPx, txt, color=d == 1 ? color.new(color.green, 20) : color.new(color.red, 20), textcolor=color.white, style=d == 1 ? label.style_label_up : label.style_label_down, size=size.small)
-        label.new(bar_index, tpPx, "TP", color=color.new(color.green, 100), textcolor=color.green, style=label.style_label_left, size=size.small)
-        label.new(bar_index, slPx, "SL", color=color.new(color.red, 100), textcolor=color.red, style=label.style_label_left, size=size.small)
+        // Long / Short Position tool style: green profit zone, red loss zone
+        tpTxt = "Target: " + str.tostring(tpPx, format.mintick) + " (" + str.tostring(math.abs(tpPx - entryPx) / entryPx * 100, "#.##") + "%) Amount: " + str.tostring(rewardMoney, "#.##")
+        slTxt = "Stop: " + str.tostring(slPx, format.mintick) + " (" + str.tostring(dist / entryPx * 100, "#.##") + "%) Amount: " + str.tostring(riskMoney, "#.##")
+        tpBox := box.new(bar_index, math.max(entryPx, tpPx), bar_index + 1, math.min(entryPx, tpPx), border_color=color.new(color.green, 30), bgcolor=color.new(color.green, 80), text=tpTxt, text_color=color.white, text_size=size.small, text_halign=text.align_left, text_valign=d == 1 ? text.align_top : text.align_bottom)
+        slBox := box.new(bar_index, math.max(entryPx, slPx), bar_index + 1, math.min(entryPx, slPx), border_color=color.new(color.red, 30), bgcolor=color.new(color.red, 80), text=slTxt, text_color=color.white, text_size=size.small, text_halign=text.align_left, text_valign=d == 1 ? text.align_bottom : text.align_top)
+        txt = (d == 1 ? "LONG " : "SHORT ") + str.tostring(entryPx, format.mintick) + "\nQty: " + str.tostring(lots) + " lots | Risk/Reward Ratio: " + str.tostring(rr, "#.##") + (capped ? "\nSL capped at " + str.tostring(maxRiskPct) + "% risk" : "")
+        label.new(bar_index, entryPx, txt, color=color.new(color.blue, 10), textcolor=color.white, style=label.style_label_right, size=size.small)
 
 // ===== Trade management =====
 float exitPx = na
@@ -160,12 +164,13 @@ if state == 3
     else if not beDone and (dir == 1 ? high >= beLevel : low <= beLevel)
         beDone := true
         slPx := entryPx
-        line.set_x2(slLn, bar_index)
         slLn := line.new(bar_index, entryPx, bar_index, entryPx, color=color.orange, style=line.style_dashed, width=2)
         label.new(bar_index, entryPx, "SL → BE", color=color.new(color.orange, 100), textcolor=color.orange, style=label.style_label_left, size=size.small)
     line.set_x2(entryLn, bar_index)
-    line.set_x2(slLn, bar_index)
-    line.set_x2(tpLn, bar_index)
+    if not na(slLn)
+        line.set_x2(slLn, bar_index)
+    box.set_right(tpBox, bar_index + 1)
+    box.set_right(slBox, bar_index + 1)
 
 exitWin = res == "WIN"
 exitLoss = res == "LOSS"
