@@ -10,6 +10,8 @@
 //    LONG  = prev close above MA, wick trades at/below MA, candle closes back above MA.
 //    SHORT = prev close below MA, wick trades at/above MA, candle closes back below MA.
 //    The position is placed at the close of the next 3m candle after the wick candle closes.
+//    Optional triple close: wait until the last 3 closed 3m AND 5m candles all closed bullish (long) /
+//    bearish (short), then enter at that 3m close. Cancelled if price closes beyond the wick or it takes too long.
 // 4. User lot size. SL at the high/low of the wick candle (+ optional buffer), capped so risk <= Max SL Risk % of balance.
 // 5. 100% TP at the rolling 24h high (long) / low (short), rounded to a whole number toward entry.
 //    If entry is at the 24h extreme (no room), the previous day high/low is used instead.
@@ -45,6 +47,8 @@ smoothType = input.string("None", "Smoothing Type", options=["None", "SMA", "SMA
 smoothLen = input.int(14, "Smoothing Length", minval=1, group="Smoothing", display=display.none)
 bbMult = input.float(2.0, "BB StdDev", minval=0.001, maxval=50, step=0.5, group="Smoothing", display=display.none, tooltip="Only used with SMA + Bollinger Bands.")
 signalLine = input.string("Smoothed MA", "Strategy Uses", options=["Smoothed MA", "Raw MA"], group="Smoothing", display=display.none, tooltip="Which line the touch and wick rules use. Falls back to the raw MA when Smoothing Type is None.")
+needTriple = input.bool(true, "Require Triple Close (3m + 5m)", group="Entry", display=display.none, tooltip="After the wick, wait until the last 3 closed 3m and 5m candles are all bullish (long) or all bearish (short), then enter at that 3m close.")
+tripleWait = input.int(20, "Max Wait for Triple Close (3m candles)", minval=1, group="Entry", display=display.none, tooltip="Setup is cancelled if the triple close does not happen within this many 3m candles after the wick.")
 wickMode = input.string("5m or 15m", "Wick Confirmation", options=["5m", "15m", "5m or 15m", "5m and 15m"], group="Entry", display=display.none, tooltip="Entry is placed at the close of the next 3m candle after the wick candle.")
 balanceIn = input.float(10000, "Account Balance", minval=1, group="Risk", display=display.none, tooltip="Only used for the max SL risk cap.")
 lots = input.float(0.10, "Lot Size", minval=0.01, step=0.01, group="Risk", display=display.none)
@@ -98,17 +102,18 @@ ma = useSmooth ? maSmooth : maRaw
 // Lower than or equal to chart TF: all candles inside the bar. Higher: the candle that just closed.
 f_candles(simple string tf) =>
     isLower = timeframe.in_seconds(tf) <= chartSec
-    [tL, hL, lL, cL] = request.security_lower_tf(syminfo.tickerid, isLower ? tf : timeframe.period, [time, high, low, close])
-    [tH, hH, lH, cH] = request.security(syminfo.tickerid, isLower ? timeframe.period : tf, [time[1], high[1], low[1], close[1]], lookahead=barmerge.lookahead_on)
+    [tL, oL, hL, lL, cL] = request.security_lower_tf(syminfo.tickerid, isLower ? tf : timeframe.period, [time, open, high, low, close])
+    [tH, oH, hH, lH, cH] = request.security(syminfo.tickerid, isLower ? timeframe.period : tf, [time[1], open[1], high[1], low[1], close[1]], lookahead=barmerge.lookahead_on)
     take = not isLower and timeframe.change(tf) and not na(tH)
     tA = isLower ? tL : take ? array.from(tH) : array.new<int>()
+    oA = isLower ? oL : take ? array.from(oH) : array.new<float>()
     hA = isLower ? hL : take ? array.from(hH) : array.new<float>()
     lA = isLower ? lL : take ? array.from(lH) : array.new<float>()
     cA = isLower ? cL : take ? array.from(cH) : array.new<float>()
-    [tA, hA, lA, cA]
-[t3, h3, l3, c3] = f_candles("3")
-[t5, h5, l5, c5] = f_candles("5")
-[t15, h15, l15, c15] = f_candles("15")
+    [tA, oA, hA, lA, cA]
+[t3, o3, h3, l3, c3] = f_candles("3")
+[t5, o5, h5, l5, c5] = f_candles("5")
+[t15, o15, h15, l15, c15] = f_candles("15")
 
 // Rolling 24h (96 x 15m) high/low as of each 15m candle close, aligned with the 15m candles above
 f_range24() =>
@@ -142,6 +147,11 @@ type Engine
     float lo24 = na
     int bull5T = na
     int bear5T = na
+    int up3 = 0
+    int dn3 = 0
+    int up5 = 0
+    int dn5 = 0
+    int waited = 0
     int wins = 0
     int losses = 0
     int bes = 0
@@ -162,7 +172,7 @@ f_skip(int T, float y, int d, string why) =>
 f_whole(p, step, down) => step > 0 ? (down ? math.floor(p / step) * step : math.ceil(p / step) * step) : p
 
 // A closed 5m / 15m candle: wick rejection check
-f_wick(Engine e, bool is5, int t, float h, float l, float c, float m, float rh, float rl) =>
+f_wick(Engine e, bool is5, int t, float o, float h, float l, float c, float m, float rh, float rl) =>
     T = t + (is5 ? MS5 : MS15)
     pc = is5 ? e.prev5 : e.prev15
     bull = not na(pc) and pc > m and l <= m and c > m
@@ -171,6 +181,9 @@ f_wick(Engine e, bool is5, int t, float h, float l, float c, float m, float rh, 
     bool sigS = false
     if is5
         e.prev5 := c
+        // consecutive bullish / bearish 5m closes
+        e.up5 := c > o ? e.up5 + 1 : 0
+        e.dn5 := c < o ? e.dn5 + 1 : 0
         if bull
             e.bull5T := T
         if bear
@@ -193,11 +206,15 @@ f_wick(Engine e, bool is5, int t, float h, float l, float c, float m, float rh, 
         e.pSl := (d == 1 ? l : h) - d * slBuffer
         e.pDir := d
         e.pT := T
+        e.waited := 0
         e.state := 4
 
 // A closed 3m candle: manage trade, fill pending entry, detect MA touch
-f_bar3(Engine e, int t, float h, float l, float c, float m, float pdhV, float pdlV) =>
+f_bar3(Engine e, int t, float o, float h, float l, float c, float m, float pdhV, float pdlV) =>
     T = t + MS3
+    // consecutive bullish / bearish 3m closes
+    e.up3 := c > o ? e.up3 + 1 : 0
+    e.dn3 := c < o ? e.dn3 + 1 : 0
     // keep the 24h range current between 15m closes
     e.hi24 := na(e.hi24) ? na : math.max(e.hi24, h)
     e.lo24 := na(e.lo24) ? na : math.min(e.lo24, l)
@@ -234,6 +251,9 @@ f_bar3(Engine e, int t, float h, float l, float c, float m, float pdhV, float pd
             e.evExit := true
     else if e.state == 4 and T > e.pT
         d = e.pDir
+        e.waited := e.waited + 1
+        tripleOk = not needTriple or (d == 1 ? e.up3 >= 3 and e.up5 >= 3 : e.dn3 >= 3 and e.dn5 >= 3)
+        beyondWick = d == 1 ? c <= e.pSl : c >= e.pSl
         tp24 = d == 1 ? f_whole(e.hi24, wholeStep, true) : f_whole(e.lo24, wholeStep, false)
         tpPd = d == 1 ? f_whole(pdhV, wholeStep, true) : f_whole(pdlV, wholeStep, false)
         ok24 = not na(tp24) and (d == 1 ? tp24 > c : tp24 < c)
@@ -241,8 +261,13 @@ f_bar3(Engine e, int t, float h, float l, float c, float m, float pdhV, float pd
         tp0 = ok24 ? tp24 : tpPd
         rawDist = d == 1 ? c - e.pSl : e.pSl - c
         validTp = not na(tp0) and (d == 1 ? tp0 > c : tp0 < c)
+        // waiting for the triple close: cancel if price closes beyond the wick or it takes too long
+        if not tripleOk
+            if beyondWick or e.waited >= tripleWait
+                e.state := 2
+                f_skip(T, c, d, beyondWick ? "closed beyond the wick before the triple close" : "no 3m + 5m triple close within " + str.tostring(tripleWait) + " 3m candles")
         // 3m close back through the wick or no room to the target -> skip and stay armed
-        if rawDist <= 0 or not validTp
+        else if rawDist <= 0 or not validTp
             e.state := 2
             f_skip(T, c, d, rawDist <= 0 ? "3m entry candle closed beyond the wick (no room for SL)" : "no room to the 24h / prev day target")
         else
@@ -305,20 +330,21 @@ if tfOk and inLookback and not na(ma)
             T3 = array.get(t3, i) + MS3
             if T3 > nowT
                 break
-            // wick candles that closed before this 3m candle closed
-            while i5 < n5 and array.get(t5, i5) + MS5 < T3
-                f_wick(eng, true, array.get(t5, i5), array.get(h5, i5), array.get(l5, i5), array.get(c5, i5), ma, na, na)
+            // 5m / 15m candles that closed by the time this 3m candle closed
+            // (a wick at the same time still fills on the next 3m close: see T > e.pT)
+            while i5 < n5 and array.get(t5, i5) + MS5 <= T3
+                f_wick(eng, true, array.get(t5, i5), array.get(o5, i5), array.get(h5, i5), array.get(l5, i5), array.get(c5, i5), ma, na, na)
                 i5 += 1
-            while i15 < n15 and array.get(t15, i15) + MS15 < T3
-                f_wick(eng, false, array.get(t15, i15), array.get(h15, i15), array.get(l15, i15), array.get(c15, i15), ma, i15 < array.size(r24h) ? array.get(r24h, i15) : na, i15 < array.size(r24l) ? array.get(r24l, i15) : na)
+            while i15 < n15 and array.get(t15, i15) + MS15 <= T3
+                f_wick(eng, false, array.get(t15, i15), array.get(o15, i15), array.get(h15, i15), array.get(l15, i15), array.get(c15, i15), ma, i15 < array.size(r24h) ? array.get(r24h, i15) : na, i15 < array.size(r24l) ? array.get(r24l, i15) : na)
                 i15 += 1
-            f_bar3(eng, array.get(t3, i), array.get(h3, i), array.get(l3, i), array.get(c3, i), ma, pdh, pdl)
+            f_bar3(eng, array.get(t3, i), array.get(o3, i), array.get(h3, i), array.get(l3, i), array.get(c3, i), ma, pdh, pdl)
     // wick candles closing at the end of this bar
     while i5 < n5 and array.get(t5, i5) + MS5 <= nowT
-        f_wick(eng, true, array.get(t5, i5), array.get(h5, i5), array.get(l5, i5), array.get(c5, i5), ma, na, na)
+        f_wick(eng, true, array.get(t5, i5), array.get(o5, i5), array.get(h5, i5), array.get(l5, i5), array.get(c5, i5), ma, na, na)
         i5 += 1
     while i15 < n15 and array.get(t15, i15) + MS15 <= nowT
-        f_wick(eng, false, array.get(t15, i15), array.get(h15, i15), array.get(l15, i15), array.get(c15, i15), ma, i15 < array.size(r24h) ? array.get(r24h, i15) : na, i15 < array.size(r24l) ? array.get(r24l, i15) : na)
+        f_wick(eng, false, array.get(t15, i15), array.get(o15, i15), array.get(h15, i15), array.get(l15, i15), array.get(c15, i15), ma, i15 < array.size(r24h) ? array.get(r24h, i15) : na, i15 < array.size(r24l) ? array.get(r24l, i15) : na)
         i15 += 1
 
 // ===== Plots =====
@@ -343,7 +369,7 @@ f_row(r, k, v, c) =>
 if showTable and barstate.islast
     st = eng.state
     dayFull = maxPerDay > 0 and eng.dayTrades >= maxPerDay
-    statusTxt = not tfOk ? "USE 3m - 1H CHART" : st == 0 ? "OFF" : (st == 1 or st == 2) and dayFull ? "DAILY LIMIT REACHED" : st == 1 ? "WAITING 1H MA TOUCH" : st == 2 ? "ARMED - WAIT WICK" : st == 4 ? "WICK - WAIT 3M CLOSE" : eng.dir == 1 ? "IN LONG" : "IN SHORT"
+    statusTxt = not tfOk ? "USE 3m - 1H CHART" : st == 0 ? "OFF" : (st == 1 or st == 2) and dayFull ? "DAILY LIMIT REACHED" : st == 1 ? "WAITING 1H MA TOUCH" : st == 2 ? "ARMED - WAIT WICK" : st == 4 ? (needTriple ? "WICK - WAIT TRIPLE CLOSE" : "WICK - WAIT 3M CLOSE") : eng.dir == 1 ? "IN LONG" : "IN SHORT"
     statusCol = st == 3 ? color.aqua : st == 2 or st == 4 ? color.yellow : st == 1 ? color.white : color.gray
     decided = eng.wins + eng.losses
     winRate = decided > 0 ? eng.wins * 100.0 / decided : 0.0
