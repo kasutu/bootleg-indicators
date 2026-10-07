@@ -12,6 +12,7 @@
 //    The position is placed at the close of the next 3m candle after the wick candle closes.
 // 4. User lot size. SL at the high/low of the wick candle (+ optional buffer), capped so risk <= Max SL Risk % of balance.
 // 5. 100% TP at the rolling 24h high (long) / low (short), rounded to a whole number toward entry.
+//    If entry is at the 24h extreme (no room), the previous day high/low is used instead.
 // 6. SL moves to break-even once 1R is reached.
 // Same 3m candle SL+TP touch is counted as SL (conservative).
 //
@@ -21,6 +22,7 @@
 // MT5 port notes (for the EA version later)
 // MA       : iMA(_Symbol, PERIOD_H1, 200, 0, MODE_SMA, PRICE_LOW), read closed bar (shift 1) via CopyBuffer
 // Wicks    : CopyRates(_Symbol, PERIOD_M5 / PERIOD_M15, 1, 2, rates) on new bar, entry on PERIOD_M3 close
+// PDH/PDL  : iHigh/iLow(_Symbol, PERIOD_D1, 1) (fallback target)
 // 24h H/L  : iHighest/iLowest(_Symbol, PERIOD_M15, MODE_HIGH/MODE_LOW, 96, 1) -> iHigh/iLow at that shift
 // MA notes : create the iMA handle once in OnInit, check BarsCalculated before CopyBuffer, IndicatorRelease in OnDeinit
 // Risk     : lossPerLot = (slDist / SYMBOL_TRADE_TICK_SIZE) * SYMBOL_TRADE_TICK_VALUE_LOSS
@@ -86,6 +88,7 @@ smoothOn = smoothType != "None"
 useSmooth = smoothOn and signalLine == "Smoothed MA"
 ma = useSmooth ? maSmooth : maRaw
 // Rolling 24h high/low for display (closed 15m candles)
+[pdh, pdl] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead=barmerge.lookahead_on)
 [hi24, lo24] = request.security(syminfo.tickerid, "15", [ta.highest(high, 96)[1], ta.lowest(low, 96)[1]], lookahead=barmerge.lookahead_on)
 
 // ===== 3m / 5m / 15m candles of the current chart bar =====
@@ -178,7 +181,7 @@ f_wick(Engine e, bool is5, int t, float h, float l, float c, float m, float rh, 
         e.state := 4
 
 // A closed 3m candle: manage trade, fill pending entry, detect MA touch
-f_bar3(Engine e, int t, float h, float l, float c, float m) =>
+f_bar3(Engine e, int t, float h, float l, float c, float m, float pdhV, float pdlV) =>
     T = t + MS3
     // keep the 24h range current between 15m closes
     e.hi24 := na(e.hi24) ? na : math.max(e.hi24, h)
@@ -216,7 +219,11 @@ f_bar3(Engine e, int t, float h, float l, float c, float m) =>
             e.evExit := true
     else if e.state == 4 and T > e.pT
         d = e.pDir
-        tp0 = d == 1 ? f_whole(e.hi24, wholeStep, true) : f_whole(e.lo24, wholeStep, false)
+        tp24 = d == 1 ? f_whole(e.hi24, wholeStep, true) : f_whole(e.lo24, wholeStep, false)
+        tpPd = d == 1 ? f_whole(pdhV, wholeStep, true) : f_whole(pdlV, wholeStep, false)
+        ok24 = not na(tp24) and (d == 1 ? tp24 > c : tp24 < c)
+        // entry at the 24h extreme -> fall back to the previous day high/low
+        tp0 = ok24 ? tp24 : tpPd
         rawDist = d == 1 ? c - e.pSl : e.pSl - c
         validTp = not na(tp0) and (d == 1 ? tp0 > c : tp0 < c)
         // 3m close back through the wick or no room to the target -> skip and stay armed
@@ -237,7 +244,7 @@ f_bar3(Engine e, int t, float h, float l, float c, float m) =>
             // Long / Short Position tool style: green profit zone, red loss zone
             e.tpBox := box.new(T, math.max(c, tp0), T, math.min(c, tp0), xloc=xloc.bar_time, border_color=color.new(color.green, 60), bgcolor=color.new(color.green, 85))
             e.slBox := box.new(T, math.max(c, e.sl), T, math.min(c, e.sl), xloc=xloc.bar_time, border_color=color.new(color.red, 60), bgcolor=color.new(color.red, 85))
-            tip = "Entry (3m close): " + str.tostring(c, format.mintick) + "\nSL: " + str.tostring(e.sl, format.mintick) + (rawDist > maxDist ? " (capped at " + str.tostring(maxRiskPct) + "% risk)" : "") + "\nTP: " + str.tostring(tp0, format.mintick) + "\nRR: " + str.tostring(math.abs(tp0 - c) / dist, "#.##") + "\nLots: " + str.tostring(lots)
+            tip = "Entry (3m close): " + str.tostring(c, format.mintick) + "\nSL: " + str.tostring(e.sl, format.mintick) + (rawDist > maxDist ? " (capped at " + str.tostring(maxRiskPct) + "% risk)" : "") + "\nTP: " + str.tostring(tp0, format.mintick) + (ok24 ? " (24h)" : " (prev day)") + "\nRR: " + str.tostring(math.abs(tp0 - c) / dist, "#.##") + "\nLots: " + str.tostring(lots)
             label.new(T, c, d == 1 ? "L" : "S", xloc=xloc.bar_time, color=color.new(color.blue, 20), textcolor=color.white, style=label.style_label_right, size=size.tiny, tooltip=tip)
     // Touch / pass of the MA; a fresh touch is needed after each trade
     touch = (l <= m and h >= m) or (not na(e.prev3) and ((l > m and e.prev3 < m) or (h < m and e.prev3 > m)))
@@ -282,7 +289,7 @@ if tfOk and inLookback and not na(ma)
             while i15 < n15 and array.get(t15, i15) + MS15 < T3
                 f_wick(eng, false, array.get(t15, i15), array.get(h15, i15), array.get(l15, i15), array.get(c15, i15), ma, i15 < array.size(r24h) ? array.get(r24h, i15) : na, i15 < array.size(r24l) ? array.get(r24l, i15) : na)
                 i15 += 1
-            f_bar3(eng, array.get(t3, i), array.get(h3, i), array.get(l3, i), array.get(c3, i), ma)
+            f_bar3(eng, array.get(t3, i), array.get(h3, i), array.get(l3, i), array.get(c3, i), ma, pdh, pdl)
     // wick candles closing at the end of this bar
     while i5 < n5 and array.get(t5, i5) + MS5 <= nowT
         f_wick(eng, true, array.get(t5, i5), array.get(h5, i5), array.get(l5, i5), array.get(c5, i5), ma, na, na)
