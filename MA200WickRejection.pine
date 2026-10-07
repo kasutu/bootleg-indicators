@@ -1,0 +1,224 @@
+//@version=6
+// MA200 Wick Rejection [kasutufx]
+// Bot-assisted strategy visualizer (indicator only, no orders).
+//
+// Rules
+// 1. 1H SMA(200) computed on LOW prices.
+// 2. Manual toggle "Strategy Active". When ON, waits for price to touch / pass the 1H MA (ARMED).
+// 3. Entry on a 5m and/or 15m wick rejection of the MA:
+//    LONG  = prev close above MA, wick trades at/below MA, candle closes back above MA.
+//    SHORT = prev close below MA, wick trades at/above MA, candle closes back below MA.
+// 4. User lot size. SL at the wick extreme, capped so risk <= Max SL Risk % of balance.
+// 5. 100% TP at previous day high (long) / low (short), rounded to a whole number toward entry.
+// 6. SL moves to break-even once 1R is reached.
+// Same bar SL+TP touch is counted as SL (conservative).
+//
+// MT5 port notes (for the EA version later)
+// MA       : iMA(_Symbol, PERIOD_H1, 200, 0, MODE_SMA, PRICE_LOW), read closed bar (shift 1) via CopyBuffer
+// Wicks    : CopyRates(_Symbol, PERIOD_M5 / PERIOD_M15, 1, 2, rates) on new bar
+// PDH/PDL  : iHigh/iLow(_Symbol, PERIOD_D1, 1)
+// MA notes : create the iMA handle once in OnInit, check BarsCalculated before CopyBuffer, IndicatorRelease in OnDeinit
+// Risk     : lossPerLot = (slDist / SYMBOL_TRADE_TICK_SIZE) * SYMBOL_TRADE_TICK_VALUE_LOSS
+//            or OrderCalcProfit(type, _Symbol, lots, entry, sl, loss) (EA/script only, already in deposit currency)
+//            Contract Size input below = SYMBOL_TRADE_CONTRACT_SIZE
+// Lots     : normalize with SYMBOL_VOLUME_MIN / SYMBOL_VOLUME_STEP / SYMBOL_VOLUME_MAX, OrderCheck before OrderSend
+// BE       : CTrade.PositionModify(ticket, entryPrice, tp), only if price is beyond SYMBOL_TRADE_STOPS_LEVEL
+//            and SYMBOL_TRADE_FREEZE_LEVEL (points) from the current price
+indicator("MA200 Wick Rejection [kasutufx]", shorttitle="MA200 Wick", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
+
+// ===== Inputs =====
+active = input.bool(true, "Strategy Active (manual toggle)", group="Control")
+startTime = input.time(timestamp("2025-01-01T00:00:00"), "Active From", group="Control", tooltip="Signals and stats are only counted from this date.")
+maLen = input.int(200, "MA Length", minval=1, group="Moving Average")
+maTF = input.timeframe("60", "MA Timeframe", group="Moving Average")
+wickMode = input.string("5m or 15m", "Wick Confirmation", options=["5m", "15m", "5m or 15m", "5m and 15m"], group="Entry")
+balanceIn = input.float(10000, "Account Balance", minval=1, group="Risk")
+lots = input.float(0.10, "Lot Size", minval=0.01, step=0.01, group="Risk")
+contractSize = input.float(100000, "Contract Size (units per lot)", minval=0.0001, group="Risk", tooltip="MT5 SYMBOL_TRADE_CONTRACT_SIZE. Forex = 100000, XAUUSD = 100, many indices = 1. P/L assumes account currency = quote currency.")
+maxRiskPct = input.float(30, "Max SL Risk % of Balance", minval=0.1, maxval=100, group="Risk")
+wholeStep = input.float(1.0, "Whole Number Step", minval=0, group="Targets", tooltip="TP = prev day high/low rounded to this step toward entry. 1.0 for gold, 0.01 for EURUSD. 0 = no rounding.")
+beRR = input.float(1.0, "Move SL to BE at RR", minval=0.1, step=0.1, group="Targets")
+showPD = input.bool(true, "Show Prev Day High/Low", group="Display")
+showTable = input.bool(true, "Show Stats Table", group="Display")
+
+// ===== Data =====
+// Closed 1H bar values only (non-repainting)
+ma = request.security(syminfo.tickerid, maTF, ta.sma(low, maLen)[1], lookahead=barmerge.lookahead_on)
+[pdh, pdl] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead=barmerge.lookahead_on)
+
+// Last closed 5m / 15m candle: [high, low, close, previous close]
+f_bar() => [high[1], low[1], close[1], close[2]]
+[h5, l5, c5, pc5] = request.security(syminfo.tickerid, "5", f_bar(), lookahead=barmerge.lookahead_on)
+[h15, l15, c15, pc15] = request.security(syminfo.tickerid, "15", f_bar(), lookahead=barmerge.lookahead_on)
+new5 = timeframe.change("5")
+new15 = timeframe.change("15")
+
+needSec = wickMode == "15m" ? 900 : 300
+tfOk = timeframe.isintraday and timeframe.in_seconds() <= needSec
+
+f_whole(p, step, down) => step > 0 ? (down ? math.floor(p / step) * step : math.ceil(p / step) * step) : p
+
+// ===== Wick signals =====
+bull5 = new5 and pc5 > ma and l5 <= ma and c5 > ma
+bear5 = new5 and pc5 < ma and h5 >= ma and c5 < ma
+bull15 = new15 and pc15 > ma and l15 <= ma and c15 > ma
+bear15 = new15 and pc15 < ma and h15 >= ma and c15 < ma
+
+longSig = switch wickMode
+    "5m" => bull5
+    "15m" => bull15
+    "5m or 15m" => bull5 or bull15
+    => bull5 and bull15
+shortSig = switch wickMode
+    "5m" => bear5
+    "15m" => bear15
+    "5m or 15m" => bear5 or bear15
+    => bear5 and bear15
+
+// ===== State =====
+// 0 = OFF, 1 = WAITING FOR MA TOUCH, 2 = ARMED, 3 = IN TRADE
+var int state = 0
+var int dir = 0
+var float entryPx = na
+var float slPx = na
+var float tpPx = na
+var float riskDist = na
+var bool beDone = false
+var int wins = 0
+var int losses = 0
+var int bes = 0
+var float balance = balanceIn
+var float netPnl = 0.0
+var line entryLn = na
+var line slLn = na
+var box tpBox = na
+var box slBox = na
+
+enabled = active and time >= startTime and tfOk and not na(ma)
+
+if not enabled and state != 3
+    state := 0
+else if enabled and state == 0
+    state := 1
+
+// Touch / pass of the 1H MA (incl. gaps through it)
+touched = (low <= ma and high >= ma) or (low > ma and close[1] < ma) or (high < ma and close[1] > ma)
+if state == 1 and touched
+    state := 2
+
+// ===== Entry =====
+enteredLong = false
+enteredShort = false
+if state == 2 and longSig != shortSig
+    d = longSig ? 1 : -1
+    useBoth5 = wickMode != "15m" and (d == 1 ? bull5 : bear5)
+    useBoth15 = wickMode != "5m" and (d == 1 ? bull15 : bear15)
+    ep = useBoth5 ? c5 : c15
+    float rawSl = na
+    if d == 1
+        rawSl := useBoth5 and useBoth15 ? math.min(l5, l15) : useBoth5 ? l5 : l15
+    else
+        rawSl := useBoth5 and useBoth15 ? math.max(h5, h15) : useBoth5 ? h5 : h15
+    tp0 = d == 1 ? f_whole(pdh, wholeStep, true) : f_whole(pdl, wholeStep, false)
+    maxDist = (balance * maxRiskPct / 100) / (lots * contractSize)
+    rawDist = math.abs(ep - rawSl)
+    capped = rawDist > maxDist
+    dist = math.min(rawDist, maxDist)
+    validTp = not na(tp0) and (d == 1 ? tp0 > ep : tp0 < ep)
+    if dist > 0 and validTp
+        state := 3
+        dir := d
+        entryPx := ep
+        slPx := ep - d * dist
+        tpPx := tp0
+        riskDist := dist
+        beDone := false
+        enteredLong := d == 1
+        enteredShort := d == -1
+        entryLn := line.new(bar_index, entryPx, bar_index, entryPx, color=color.blue, width=2)
+        slLn := na
+        riskMoney = dist * lots * contractSize
+        rewardMoney = math.abs(tpPx - entryPx) * lots * contractSize
+        rr = math.abs(tpPx - entryPx) / dist
+        // Long / Short Position tool style: green profit zone, red loss zone
+        tpTxt = "Target: " + str.tostring(tpPx, format.mintick) + " (" + str.tostring(math.abs(tpPx - entryPx) / entryPx * 100, "#.##") + "%) Amount: " + str.tostring(rewardMoney, "#.##")
+        slTxt = "Stop: " + str.tostring(slPx, format.mintick) + " (" + str.tostring(dist / entryPx * 100, "#.##") + "%) Amount: " + str.tostring(riskMoney, "#.##")
+        tpBox := box.new(bar_index, math.max(entryPx, tpPx), bar_index + 1, math.min(entryPx, tpPx), border_color=color.new(color.green, 30), bgcolor=color.new(color.green, 80), text=tpTxt, text_color=color.white, text_size=size.small, text_halign=text.align_left, text_valign=d == 1 ? text.align_top : text.align_bottom)
+        slBox := box.new(bar_index, math.max(entryPx, slPx), bar_index + 1, math.min(entryPx, slPx), border_color=color.new(color.red, 30), bgcolor=color.new(color.red, 80), text=slTxt, text_color=color.white, text_size=size.small, text_halign=text.align_left, text_valign=d == 1 ? text.align_bottom : text.align_top)
+        txt = (d == 1 ? "LONG " : "SHORT ") + str.tostring(entryPx, format.mintick) + "\nQty: " + str.tostring(lots) + " lots | Risk/Reward Ratio: " + str.tostring(rr, "#.##") + (capped ? "\nSL capped at " + str.tostring(maxRiskPct) + "% risk" : "")
+        label.new(bar_index, entryPx, txt, color=color.new(color.blue, 10), textcolor=color.white, style=label.style_label_right, size=size.small)
+
+// ===== Trade management =====
+float exitPx = na
+string res = ""
+if state == 3
+    hitSl = dir == 1 ? low <= slPx : high >= slPx
+    hitTp = dir == 1 ? high >= tpPx : low <= tpPx
+    beLevel = entryPx + dir * riskDist * beRR
+    if hitSl
+        exitPx := slPx
+        res := beDone ? "BE" : "LOSS"
+    else if hitTp
+        exitPx := tpPx
+        res := "WIN"
+    else if not beDone and (dir == 1 ? high >= beLevel : low <= beLevel)
+        beDone := true
+        slPx := entryPx
+        slLn := line.new(bar_index, entryPx, bar_index, entryPx, color=color.orange, style=line.style_dashed, width=2)
+        label.new(bar_index, entryPx, "SL → BE", color=color.new(color.orange, 100), textcolor=color.orange, style=label.style_label_left, size=size.small)
+    line.set_x2(entryLn, bar_index)
+    if not na(slLn)
+        line.set_x2(slLn, bar_index)
+    box.set_right(tpBox, bar_index + 1)
+    box.set_right(slBox, bar_index + 1)
+
+exitWin = res == "WIN"
+exitLoss = res == "LOSS"
+exitBe = res == "BE"
+if not na(exitPx)
+    pnl = dir * (exitPx - entryPx) * lots * contractSize
+    balance += pnl
+    netPnl += pnl
+    if exitWin
+        wins += 1
+    else if exitLoss
+        losses += 1
+    else
+        bes += 1
+    exitCol = exitWin ? color.green : exitLoss ? color.red : color.orange
+    label.new(bar_index, exitPx, res + " " + (pnl >= 0 ? "+" : "") + str.tostring(pnl, "#.##"), color=exitCol, textcolor=color.white, style=dir == 1 ? (exitWin ? label.style_label_down : label.style_label_up) : (exitWin ? label.style_label_up : label.style_label_down), size=size.small)
+    state := enabled ? 1 : 0
+    dir := 0
+
+// ===== Plots =====
+plot(ma, "1H SMA200 (Low)", color=color.yellow, linewidth=2)
+plot(showPD ? pdh : na, "Prev Day High", color=color.new(color.green, 60), style=plot.style_stepline)
+plot(showPD ? pdl : na, "Prev Day Low", color=color.new(color.red, 60), style=plot.style_stepline)
+bgcolor(state == 2 ? color.new(color.yellow, 92) : na, title="Armed")
+
+alertcondition(enteredLong, "Long Entry", "MA200 Wick: LONG entry")
+alertcondition(enteredShort, "Short Entry", "MA200 Wick: SHORT entry")
+alertcondition(exitWin or exitLoss or exitBe, "Trade Exit", "MA200 Wick: trade closed")
+
+// ===== Stats table =====
+var table tbl = table.new(position.top_right, 2, 10, bgcolor=color.new(color.black, 20), border_width=1, border_color=color.gray)
+f_row(r, k, v, c) =>
+    table.cell(tbl, 0, r, k, text_color=color.white, text_size=size.small, text_halign=text.align_left)
+    table.cell(tbl, 1, r, v, text_color=c, text_size=size.small, text_halign=text.align_right)
+
+if showTable and barstate.islast
+    statusTxt = not tfOk ? "USE ≤ " + (needSec == 900 ? "15m" : "5m") + " CHART" : state == 0 ? "OFF" : state == 1 ? "WAITING 1H MA TOUCH" : state == 2 ? "ARMED - WAIT WICK" : dir == 1 ? "IN LONG" : "IN SHORT"
+    statusCol = state == 3 ? color.aqua : state == 2 ? color.yellow : state == 1 ? color.white : color.gray
+    decided = wins + losses
+    winRate = decided > 0 ? wins * 100.0 / decided : 0.0
+    wlRatio = losses > 0 ? wins * 1.0 / losses : wins * 1.0
+    f_row(0, "Status", statusTxt, statusCol)
+    f_row(1, "1H MA" + str.tostring(maLen), str.tostring(ma, format.mintick), color.yellow)
+    f_row(2, "PDH / PDL", str.tostring(pdh, format.mintick) + " / " + str.tostring(pdl, format.mintick), color.white)
+    f_row(3, "Wins", str.tostring(wins), color.green)
+    f_row(4, "Losses", str.tostring(losses), color.red)
+    f_row(5, "Break-even", str.tostring(bes), color.orange)
+    f_row(6, "Win Rate", str.tostring(winRate, "#.#") + "%", winRate >= 50 ? color.green : color.red)
+    f_row(7, "Win/Loss Ratio", str.tostring(wlRatio, "#.##"), wlRatio >= 1 ? color.green : color.red)
+    f_row(8, "Net P/L", str.tostring(netPnl, "#.##"), netPnl >= 0 ? color.green : color.red)
+    f_row(9, "Balance", str.tostring(balance, "#.##"), color.white)
