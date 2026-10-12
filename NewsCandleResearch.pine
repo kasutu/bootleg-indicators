@@ -8,8 +8,10 @@
 // Other end   : bullish news candle -> its low (or open), bearish -> its high (or open).
 // Return candle: the first later candle that trades back to the other end (within Max Wait candles).
 // Studied     : how often / how fast price returns, the return candle's body composition (direction, body %,
-//               wicks, close beyond the end), and volume, RSI and Bollinger Bands at the news and return candles.
-indicator("News Candle Research [kasutufx]", shorttitle="News Research", overlay=true, max_labels_count=500)
+//               wicks, close beyond the end) and pattern, and volume, RSI and Bollinger Bands at both candles.
+// Pattern     : return candle, checked in this order: Engulfing (against the news, body engulfs the previous
+//               body), Marubozu (body >= 80%), Pin bar (wick toward the end >= 60%), Doji (body <= 10%), Normal.
+indicator("News Candle Research [kasutufx]", shorttitle="News Research", overlay=true, max_labels_count=500, max_boxes_count=500)
 
 // ===== Inputs =====
 newsMult = input.float(2.0, "News Candle Size (x largest prior range)", minval=1, step=0.1, group="News Candle")
@@ -57,14 +59,23 @@ f_study() =>
     var float rVol = 0.0
     var float rRsi = 0.0
     var int rPierce = 0
+    var int rEng = 0
+    var int rMaru = 0
+    var int rPin = 0
+    var int rDoji = 0
     // pending news candle
     var int pDir = 0
     var float pEnd = na
     var int pBar = na
+    var int legAgainst = 0
     bool evRet = false
     int age = 0
+    string pat = ""
+    int leg = 0
     if pDir != 0 and bar_index > pBar
         age := bar_index - pBar
+        against = pDir == 1 ? close < open : close > open
+        legAgainst += against ? 1 : 0
         if pDir == 1 ? low <= pEnd : high >= pEnd
             evRet := true
             rCnt += 1
@@ -78,6 +89,16 @@ f_study() =>
             rVol += nz(volR)
             rRsi += nz(rsi)
             rPierce += (pDir == 1 ? low < dn : high > up) ? 1 : 0
+            // candle pattern of the return candle
+            bodyP = rng > 0 ? (bodyTop - bodyBot) / rng * 100 : 0
+            wickToP = rng > 0 ? (pDir == 1 ? bodyBot - low : high - bodyTop) / rng * 100 : 0
+            engulf = against and bodyTop >= math.max(open[1], close[1]) and bodyBot <= math.min(open[1], close[1]) and (bodyTop - bodyBot) > math.abs(close[1] - open[1])
+            pat := engulf ? "Engulfing" : bodyP >= 80 ? "Marubozu" : wickToP >= 60 ? "Pin bar" : bodyP <= 10 ? "Doji" : "Normal"
+            rEng += pat == "Engulfing" ? 1 : 0
+            rMaru += pat == "Marubozu" ? 1 : 0
+            rPin += pat == "Pin bar" ? 1 : 0
+            rDoji += pat == "Doji" ? 1 : 0
+            leg := legAgainst
             pDir := 0
         else if age >= maxWait
             pDir := 0
@@ -92,15 +113,20 @@ f_study() =>
         pDir := d
         pEnd := endMode == "Wick" ? (d == 1 ? low : high) : open
         pBar := bar_index
-    [nCnt, nVol, nRsi, nOut, rCnt, rBars, rCounter, rBody, rWickTo, rWickAway, rBeyond, rVol, rRsi, rPierce, evNews, evRet, age]
+        legAgainst := 0
+    [nCnt, nVol, nRsi, nOut, rCnt, rBars, rCounter, rBody, rWickTo, rWickAway, rBeyond, rVol, rRsi, rPierce, rEng, rMaru, rPin, rDoji, evNews, evRet, age, pat, leg]
 
-[a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, aN, aR, aAge] = request.security(syminfo.tickerid, "5", f_study())
-[b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, bN, bR, bAge] = request.security(syminfo.tickerid, "15", f_study())
-[c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, cN, cR, cAge] = f_study()
+[a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, aN, aR, aAge, aPat, aLeg] = request.security(syminfo.tickerid, "5", f_study())
+[b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17, bN, bR, bAge, bPat, bLeg] = request.security(syminfo.tickerid, "15", f_study())
+[c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15, c16, c17, cN, cR, cAge, cPat, cLeg] = f_study()
 
 // ===== Chart marks (chart timeframe) =====
 chartVolR = volume / ta.sma(volume, volLen)
 chartRsi = ta.rsi(close, rsiLen)
+// extremes of the move from the news candle to the return candle
+legLen = math.max(1, nz(cAge) + 1)
+legHi = ta.highest(high, legLen)
+legLo = ta.lowest(low, legLen)
 if showMarks and barstate.isconfirmed and cN
     label.new(bar_index, close > open ? low : high, "N", color=color.new(color.yellow, 20), textcolor=color.black, style=close > open ? label.style_label_up : label.style_label_down, size=size.tiny, tooltip="News candle\nVolume " + str.tostring(chartVolR, "#.#") + "x avg\nRSI " + str.tostring(chartRsi, "#.#"))
 if showMarks and barstate.isconfirmed and cR
@@ -108,16 +134,19 @@ if showMarks and barstate.isconfirmed and cR
     bodyP = rng0 > 0 ? math.abs(close - open) / rng0 * 100 : 0
     upW = rng0 > 0 ? (high - math.max(open, close)) / rng0 * 100 : 0
     loW = rng0 > 0 ? (math.min(open, close) - low) / rng0 * 100 : 0
-    label.new(bar_index, close > open ? high : low, "R", color=color.new(color.aqua, 20), textcolor=color.black, style=close > open ? label.style_label_down : label.style_label_up, size=size.tiny, tooltip="Return candle (" + str.tostring(cAge) + " candles after news)\n" + (close > open ? "Bullish" : close < open ? "Bearish" : "Doji") + " | body " + str.tostring(bodyP, "#") + "%\nUpper wick " + str.tostring(upW, "#") + "% | lower wick " + str.tostring(loW, "#") + "%\nVolume " + str.tostring(chartVolR, "#.#") + "x avg | RSI " + str.tostring(chartRsi, "#.#"))
+    // box over the reversal side: news candle -> return candle
+    box.new(bar_index - cAge, legHi, bar_index, legLo, border_color=color.new(color.aqua, 40), bgcolor=color.new(color.aqua, 88))
+    code = cPat == "Engulfing" ? "ENG" : cPat == "Marubozu" ? "MARU" : cPat == "Pin bar" ? "PIN" : cPat == "Doji" ? "DOJI" : "R"
+    label.new(bar_index, close > open ? high : low, code, color=color.new(color.aqua, 20), textcolor=color.black, style=close > open ? label.style_label_down : label.style_label_up, size=size.tiny, tooltip="Return candle: " + cPat + " (" + str.tostring(cAge) + " candles after news, " + str.tostring(cLeg) + " against the news)\n" + (close > open ? "Bullish" : close < open ? "Bearish" : "Doji") + " | body " + str.tostring(bodyP, "#") + "%\nUpper wick " + str.tostring(upW, "#") + "% | lower wick " + str.tostring(loW, "#") + "%\nVolume " + str.tostring(chartVolR, "#.#") + "x avg | RSI " + str.tostring(chartRsi, "#.#"))
 
 // ===== Dashboard =====
 f_pct(float part, float whole) => whole > 0 ? str.tostring(part / whole * 100, "#") + "%" : "-"
 f_avg(float sum, float n, string fmt) => n > 0 ? str.tostring(sum / n, fmt) : "-"
 
-var table tbl = table.new(position.top_right, 4, 17, bgcolor=color.new(color.black, 15), border_width=1, border_color=color.gray)
+var table tbl = table.new(position.top_right, 4, 21, bgcolor=color.new(color.black, 15), border_width=1, border_color=color.gray)
 f_cell(int c, int r, string txt, color col) =>
     table.cell(tbl, c, r, txt, text_color=col, text_size=size.small, text_halign=c == 0 ? text.align_left : text.align_right)
-f_col(int c, string head, float n0, float n1, float n2, float n3, float r0, float r1, float r2, float r3, float r4, float r5, float r6, float r7, float r8, float r9) =>
+f_col(int c, string head, float n0, float n1, float n2, float n3, float r0, float r1, float r2, float r3, float r4, float r5, float r6, float r7, float r8, float r9, float p0, float p1, float p2, float p3) =>
     f_cell(c, 0, head, color.yellow)
     f_cell(c, 1, str.tostring(n0), color.white)
     f_cell(c, 2, f_avg(n1, n0, "#.#") + "x", color.white)
@@ -133,14 +162,18 @@ f_col(int c, string head, float n0, float n1, float n2, float n3, float r0, floa
     f_cell(c, 12, f_avg(r7, r0, "#.#") + "x", color.white)
     f_cell(c, 13, f_avg(r8, r0, "#"), color.white)
     f_cell(c, 14, f_pct(r9, r0), color.white)
+    f_cell(c, 15, f_pct(p0, r0), color.aqua)
+    f_cell(c, 16, f_pct(p1, r0), color.aqua)
+    f_cell(c, 17, f_pct(p2, r0), color.aqua)
+    f_cell(c, 18, f_pct(p3, r0), color.aqua)
 
 if barstate.islast
-    rows = array.from("News candles", "News volume (x avg)", "News RSI (avg)", "News close outside BB", "Returned to other end", "Candles to return (avg)", "Return candle against news", "Return body % (avg)", "Wick toward end % (avg)", "Wick other side % (avg)", "Return closed beyond end", "Return volume (x avg)", "Return RSI (avg)", "Return wick outside BB")
+    rows = array.from("News candles", "News volume (x avg)", "News RSI (avg)", "News close outside BB", "Returned to other end", "Candles to return (avg)", "Return candle against news", "Return body % (avg)", "Wick toward end % (avg)", "Wick other side % (avg)", "Return closed beyond end", "Return volume (x avg)", "Return RSI (avg)", "Return wick outside BB", "Pattern: Engulfing", "Pattern: Marubozu", "Pattern: Pin bar", "Pattern: Doji")
     f_cell(0, 0, "Metric", color.yellow)
     for i = 0 to rows.size() - 1
         f_cell(0, i + 1, rows.get(i), color.gray)
-    f_col(1, "5m", a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13)
-    f_col(2, "15m", b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13)
-    f_col(3, "Chart " + timeframe.period, c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13)
-    f_cell(0, 15, "Other end: " + endMode + " | max wait " + str.tostring(maxWait), color.gray)
-    f_cell(0, 16, "Counts cover the history loaded on each TF", color.gray)
+    f_col(1, "5m", a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17)
+    f_col(2, "15m", b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17)
+    f_col(3, "Chart " + timeframe.period, c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15, c16, c17)
+    f_cell(0, 19, "Other end: " + endMode + " | max wait " + str.tostring(maxWait), color.gray)
+    f_cell(0, 20, "Counts cover the history loaded on each TF", color.gray)
