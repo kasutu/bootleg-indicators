@@ -9,6 +9,9 @@
 //             the news, and the tip usually forms within the first candles).
 //             Entry = first candle closing against a news candle within Fade Window candles.
 //             SL = beyond the tip (extreme since the news candle) + ATR buffer. TP = other end of the news candle.
+// RESEARCH  : every entry records its conditions (volume, body, RSI, BB %B, risk, RR, range, news size, tip
+//             extension). The bottom table shows the winners' range and average vs the losers' average per setup;
+//             the Dial-in Filters restrict entries to the range you choose.
 indicator("Trend Sniper Mini [kasutufx]", shorttitle="Sniper Mini", overlay=true, max_boxes_count=300, max_labels_count=400)
 
 // ===== Inputs =====
@@ -26,6 +29,17 @@ needBB = input.bool(true, "News Must Close Outside Bollinger", group="News Fade"
 fadeWait = input.int(3, "Fade Window (candles)", minval=1, maxval=20, group="News Fade", tooltip="The first candle closing against the news candle must come within this many candles.")
 fadeBuf = input.float(0.2, "SL Buffer beyond Tip (x ATR)", minval=0, step=0.05, group="News Fade")
 keep = input.int(50, "Trades Shown", minval=1, maxval=150, group="Display")
+showStats = input.bool(true, "Show Entry Conditions Table", group="Display", tooltip="For every setup: range (min-max) and average of each entry condition among winners, and the average among losers. Use it to set the dial-in filters.")
+fVolMin = input.float(0, "Min Volume x Avg (0 = off)", minval=0, step=0.1, group="Dial-in Filters (both setups)")
+fBodyMin = input.float(0, "Min Entry Body % (0 = off)", minval=0, maxval=100, group="Dial-in Filters (both setups)")
+fRsiMin = input.float(0, "RSI Min", minval=0, maxval=100, group="Dial-in Filters (both setups)")
+fRsiMax = input.float(100, "RSI Max", minval=0, maxval=100, group="Dial-in Filters (both setups)")
+fPctBMin = input.float(-1, "BB %B Min", step=0.05, group="Dial-in Filters (both setups)", tooltip="%B: 0 = lower band, 1 = upper band, outside = below 0 / above 1.")
+fPctBMax = input.float(2, "BB %B Max", step=0.05, group="Dial-in Filters (both setups)")
+fRiskMax = input.float(0, "Max Risk in ATR (0 = off)", minval=0, step=0.1, group="Dial-in Filters (both setups)")
+fRRMin = input.float(0, "Min RR to Final TP (0 = off)", minval=0, step=0.1, group="Dial-in Filters (both setups)")
+fSizeMin = input.float(0, "Min News Size x Prior (0 = off)", minval=0, step=0.1, group="Dial-in Filters (news fade)")
+fTipMax = input.float(0, "Max Tip Extension in ATR (0 = off)", minval=0, step=0.1, group="Dial-in Filters (news fade)")
 
 // ===== Blue palette =====
 cLight = #64B5F6
@@ -61,6 +75,9 @@ var int nDir = 0
 var int nBar = na
 var float nOther = na
 var float nTip = na
+var float nClose = na
+var float nVolR = na
+var float nSize = na
 bool fadeSig = false
 int fadeDir = 0
 if nDir != 0 and barstate.isconfirmed and bar_index > nBar
@@ -76,7 +93,43 @@ if isNews
     nBar := bar_index
     nOther := nDir == 1 ? low : high
     nTip := nDir == 1 ? high : low
+    nClose := close
+    nVolR := volume / volAvg
+    nSize := rng / priorMaxRng
     label.new(bar_index, nDir == 1 ? low : high, "N", color=color.new(cPale, 10), textcolor=cDeep, style=nDir == 1 ? label.style_label_up : label.style_label_down, size=size.tiny, tooltip="News candle")
+
+// ===== Entry conditions =====
+rsi = ta.rsi(close, 14)
+pctB = bbDev > 0 ? (close - (bbBasis - bbDev)) / (2 * bbDev) : 0.5
+NF = 9
+var names = array.from("Volume x avg", "Entry body %", "RSI", "BB %B", "Risk (ATR)", "RR to final TP", "Entry range (ATR)", "News size (x prior)", "Tip ext. (ATR)")
+
+// winners: sum / min / max, losers: sum, per condition
+type Agg
+    array<float> wSum
+    array<float> wMin
+    array<float> wMax
+    array<float> lSum
+    array<int> wN
+    array<int> lN
+
+f_newAgg() => Agg.new(array.new<float>(NF, 0.0), array.new<float>(NF, na), array.new<float>(NF, na), array.new<float>(NF, 0.0), array.new<int>(NF, 0), array.new<int>(NF, 0))
+var Agg aggT = f_newAgg()
+var Agg aggN = f_newAgg()
+var array<float> cond = array.new<float>(NF, na)
+
+f_record(Agg a, array<float> c, bool won) =>
+    for i = 0 to NF - 1
+        v = c.get(i)
+        if not na(v)
+            if won
+                a.wSum.set(i, a.wSum.get(i) + v)
+                a.wMin.set(i, na(a.wMin.get(i)) ? v : math.min(a.wMin.get(i), v))
+                a.wMax.set(i, na(a.wMax.get(i)) ? v : math.max(a.wMax.get(i), v))
+                a.wN.set(i, a.wN.get(i) + 1)
+            else
+                a.lSum.set(i, a.lSum.get(i) + v)
+                a.lN.set(i, a.lN.get(i) + 1)
 
 // ===== Trades =====
 var int dir = 0
@@ -117,6 +170,7 @@ if dir != 0 and barstate.isconfirmed and bar_index > box.get_left(win)
         label.set_text(tag, label.get_text(tag) + (not won ? " SL" : isFade ? " TP" : " TP" + str.tostring(hits)))
         label.set_color(tag, won ? cLight : cDeep)
         label.set_textcolor(tag, won ? cDeep : color.white)
+        f_record(isFade ? aggN : aggT, cond, won)
         if isFade
             nTrades += 1
             nWins += won ? 1 : 0
@@ -132,8 +186,24 @@ if dir == 0 and (fadeSig or trendBuy or trendSell) and not na(atr)
     fade = fadeSig
     slPx = fade ? nTip - d * atr * fadeBuf : close - d * atr * atrMult
     tpPx = fade ? nOther : close + d * 3 * atr * atrMult
-    if (d == 1 ? slPx < close and tpPx > close : slPx > close and tpPx < close)
+    rngE = high - low
+    riskA = math.abs(close - slPx) / atr
+    rr = math.abs(tpPx - close) / math.max(math.abs(close - slPx), syminfo.mintick)
+    volR = fade ? nVolR : volume / volAvg
+    bodyE = rngE > 0 ? math.abs(close - open) / rngE * 100 : 0
+    tipExt = fade ? math.abs(nTip - nClose) / atr : na
+    passF = (fVolMin == 0 or volR >= fVolMin) and (fBodyMin == 0 or bodyE >= fBodyMin) and rsi >= fRsiMin and rsi <= fRsiMax and pctB >= fPctBMin and pctB <= fPctBMax and (fRiskMax == 0 or riskA <= fRiskMax) and (fRRMin == 0 or rr >= fRRMin) and (not fade or fSizeMin == 0 or nSize >= fSizeMin) and (not fade or fTipMax == 0 or tipExt <= fTipMax)
+    if passF and (d == 1 ? slPx < close and tpPx > close : slPx > close and tpPx < close)
         opened := true
+        cond.set(0, volR)
+        cond.set(1, bodyE)
+        cond.set(2, rsi)
+        cond.set(3, pctB)
+        cond.set(4, riskA)
+        cond.set(5, rr)
+        cond.set(6, rngE / atr)
+        cond.set(7, fade ? nSize : na)
+        cond.set(8, tipExt)
         dir := d
         isFade := fade
         entry := close
@@ -174,3 +244,25 @@ if barstate.islast
     f_row(3, "All", tTrades + nTrades, tWins + nWins)
     table.cell(dash, 0, 4, (dir == 0 ? "Flat" : (isFade ? "In news fade " : "In trend ") + (dir == 1 ? "long" : "short")) + " | trend " + (fast > slow ? "up" : "down"), text_color=cPale, text_size=size.small, text_halign=text.align_left)
     table.merge_cells(dash, 0, 4, 3, 4)
+
+// ===== Entry conditions table: winners range (avg) vs losers avg =====
+var table st = table.new(position.bottom_right, 5, NF + 2, bgcolor=color.new(#0B1E3A, 10), border_width=1, border_color=color.new(cMid, 50))
+f_win(Agg a, int i) => a.wN.get(i) > 0 ? str.tostring(a.wMin.get(i), "#.##") + " - " + str.tostring(a.wMax.get(i), "#.##") + " (" + str.tostring(a.wSum.get(i) / a.wN.get(i), "#.##") + ")" : "-"
+f_loss(Agg a, int i) => a.lN.get(i) > 0 ? str.tostring(a.lSum.get(i) / a.lN.get(i), "#.##") : "-"
+f_sc(int c, int r0, string t, color col) =>
+    table.cell(st, c, r0, t, text_color=col, text_size=size.small, text_halign=c == 0 ? text.align_left : text.align_right)
+
+if showStats and barstate.islast
+    f_sc(0, 0, "Entry condition", cLight)
+    f_sc(1, 0, "Trend win range (avg)", cLight)
+    f_sc(2, 0, "Trend loss avg", cLight)
+    f_sc(3, 0, "Fade win range (avg)", cLight)
+    f_sc(4, 0, "Fade loss avg", cLight)
+    for i = 0 to NF - 1
+        f_sc(0, i + 1, names.get(i), cPale)
+        f_sc(1, i + 1, f_win(aggT, i), color.white)
+        f_sc(2, i + 1, f_loss(aggT, i), cPale)
+        f_sc(3, i + 1, f_win(aggN, i), color.white)
+        f_sc(4, i + 1, f_loss(aggN, i), cPale)
+    f_sc(0, NF + 1, "Set the Dial-in Filters inside the winners' range, then re-check win rate and trade count.", cPale)
+    table.merge_cells(st, 0, NF + 1, 4, NF + 1)
