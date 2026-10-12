@@ -1,74 +1,176 @@
 //@version=6
 // Trend Sniper Mini [kasutufx]
-// Minimal trend-following entries with every past execution kept on the chart.
-// BUY  = fast EMA above slow EMA (+ HTF agrees) and price closes back above the fast EMA, volume above average.
-// SELL = mirror. SL = ATR x mult, TP1/TP2/TP3 = 1R/2R/3R. One trade at a time, ends at SL or TP3.
-indicator("Trend Sniper Mini [kasutufx]", shorttitle="Sniper Mini", overlay=true, max_boxes_count=300, max_labels_count=300)
+// Two setups, one trade at a time, every past execution kept on the chart. Blue palette (red-green safe).
+//
+// TREND     : fast EMA above / below slow EMA (+ HTF agrees), price closes back across the fast EMA,
+//             volume above average. SL = ATR x mult, targets 1R / 2R / 3R. Win = TP1 or better.
+// NEWS FADE : from the News Candle Research findings (news candles close outside the Bollinger Bands on high
+//             volume, about half to 70% get fully reclaimed, the reclaim is always led by candles closing against
+//             the news, and the tip usually forms within the first candles).
+//             Entry = first candle closing against a news candle within Fade Window candles.
+//             SL = beyond the tip (extreme since the news candle) + ATR buffer. TP = other end of the news candle.
+indicator("Trend Sniper Mini [kasutufx]", shorttitle="Sniper Mini", overlay=true, max_boxes_count=300, max_labels_count=400)
 
-fastLen = input.int(50, "Fast EMA")
-slowLen = input.int(200, "Slow EMA")
-htfTF = input.timeframe("15", "HTF Trend (empty = off)")
-volMult = input.float(1.2, "Volume x Average (0 = off)", minval=0, step=0.1)
-atrMult = input.float(1.5, "SL ATR Multiplier", minval=0.1, step=0.1)
-keep = input.int(50, "Trades Shown", minval=1, maxval=150)
+// ===== Inputs =====
+useTrend = input.bool(true, "Trend Entries", group="Trend")
+fastLen = input.int(50, "Fast EMA", group="Trend")
+slowLen = input.int(200, "Slow EMA", group="Trend")
+htfTF = input.timeframe("15", "HTF Trend (empty = off)", group="Trend")
+volMult = input.float(1.2, "Volume x Average (0 = off)", minval=0, step=0.1, group="Trend")
+atrMult = input.float(1.5, "SL ATR Multiplier", minval=0.1, step=0.1, group="Trend")
+useNews = input.bool(true, "News Fade Entries", group="News Fade")
+newsMult = input.float(2.0, "News Candle Size (x largest prior range)", minval=1, step=0.1, group="News Fade")
+newsLen = input.int(20, "News Lookback", minval=2, group="News Fade")
+newsBody = input.float(50, "News Min Body %", minval=0, maxval=100, group="News Fade")
+needBB = input.bool(true, "News Must Close Outside Bollinger", group="News Fade", tooltip="86-93% of news candles in the research closed outside the bands.")
+fadeWait = input.int(3, "Fade Window (candles)", minval=1, maxval=20, group="News Fade", tooltip="The first candle closing against the news candle must come within this many candles.")
+fadeBuf = input.float(0.2, "SL Buffer beyond Tip (x ATR)", minval=0, step=0.05, group="News Fade")
+keep = input.int(50, "Trades Shown", minval=1, maxval=150, group="Display")
 
+// ===== Blue palette =====
+cLight = #64B5F6
+cMid = #1E88E5
+cDeep = #0D47A1
+cPale = #BBDEFB
+cWin = color.new(#4FC3F7, 80)
+cLoss = color.new(#283593, 70)
+
+// ===== Common =====
+atr = ta.atr(14)
 fast = ta.ema(close, fastLen)
 slow = ta.ema(close, slowLen)
-atr = ta.atr(14)
+plot(fast, "Fast EMA", color.new(cLight, 20))
+plot(slow, "Slow EMA", color.new(cDeep, 0), 2)
+
+// ===== Trend signal =====
 f_htf() => ta.ema(close, fastLen)[1] - ta.ema(close, slowLen)[1]
 htfRaw = request.security(syminfo.tickerid, htfTF == "" ? timeframe.period : htfTF, f_htf(), lookahead=barmerge.lookahead_on)
 htfDiff = htfTF == "" ? 0.0 : htfRaw
-volOk = volMult == 0 or volume > ta.sma(volume, 20) * volMult
+volAvg = ta.sma(volume, 20)
+volOk = volMult == 0 or volume > volAvg * volMult
+trendBuy = useTrend and barstate.isconfirmed and fast > slow and htfDiff >= 0 and ta.crossover(close, fast) and volOk
+trendSell = useTrend and barstate.isconfirmed and fast < slow and htfDiff <= 0 and ta.crossunder(close, fast) and volOk
 
-buy = barstate.isconfirmed and fast > slow and htfDiff >= 0 and ta.crossover(close, fast) and volOk
-sell = barstate.isconfirmed and fast < slow and htfDiff <= 0 and ta.crossunder(close, fast) and volOk
+// ===== News fade signal =====
+rng = high - low
+bbBasis = ta.sma(close, 20)
+bbDev = 2 * ta.stdev(close, 20)
+priorMaxRng = ta.highest(rng, newsLen)[1]
+isNews = useNews and barstate.isconfirmed and rng > 0 and rng >= newsMult * priorMaxRng and math.abs(close - open) >= rng * newsBody / 100 and (not needBB or close > bbBasis + bbDev or close < bbBasis - bbDev)
+var int nDir = 0
+var int nBar = na
+var float nOther = na
+var float nTip = na
+bool fadeSig = false
+int fadeDir = 0
+if nDir != 0 and barstate.isconfirmed and bar_index > nBar
+    nTip := nDir == 1 ? math.max(nTip, high) : math.min(nTip, low)
+    if nDir == 1 ? close < open : close > open
+        fadeSig := true
+        fadeDir := -nDir
+        nDir := 0
+    else if bar_index - nBar >= fadeWait
+        nDir := 0
+if isNews
+    nDir := close > open ? 1 : -1
+    nBar := bar_index
+    nOther := nDir == 1 ? low : high
+    nTip := nDir == 1 ? high : low
+    label.new(bar_index, nDir == 1 ? low : high, "N", color=color.new(cPale, 10), textcolor=cDeep, style=nDir == 1 ? label.style_label_up : label.style_label_down, size=size.tiny, tooltip="News candle")
 
-plot(fast, "Fast EMA", color.new(color.green, 20))
-plot(slow, "Slow EMA", color.new(color.red, 20))
-
-// trade state
+// ===== Trades =====
 var int dir = 0
-var float sl = na
-var float r = na
+var bool isFade = false
 var float entry = na
+var float sl = na
+var float tp = na
+var float r = na
 var int hits = 0
 var box win = na
 var box loss = na
 var label tag = na
 var array<box> boxes = array.new<box>()
 var array<label> tags = array.new<label>()
+var int tTrades = 0
+var int tWins = 0
+var int nTrades = 0
+var int nWins = 0
 
-if dir != 0 and barstate.isconfirmed
+// manage the open trade (SL checked first)
+if dir != 0 and barstate.isconfirmed and bar_index > box.get_left(win)
     stopped = dir == 1 ? low <= sl : high >= sl
+    bool done = stopped
     if not stopped
-        for i = hits + 1 to 3
-            if dir == 1 ? high >= entry + i * r : low <= entry - i * r
-                hits := i
+        if isFade
+            if dir == 1 ? high >= tp : low <= tp
+                hits := 1
+                done := true
+        else
+            for i = hits + 1 to 3
+                if dir == 1 ? high >= entry + i * r : low <= entry - i * r
+                    hits := i
+            done := hits == 3
     box.set_right(win, bar_index)
     box.set_right(loss, bar_index)
-    if stopped or hits == 3
-        label.set_text(tag, label.get_text(tag) + (hits == 0 ? " SL" : " TP" + str.tostring(hits)))
-        label.set_color(tag, hits == 0 ? color.red : color.green)
+    if done
+        won = hits > 0
+        label.set_text(tag, label.get_text(tag) + (not won ? " SL" : isFade ? " TP" : " TP" + str.tostring(hits)))
+        label.set_color(tag, won ? cLight : cDeep)
+        label.set_textcolor(tag, won ? cDeep : color.white)
+        if isFade
+            nTrades += 1
+            nWins += won ? 1 : 0
+        else
+            tTrades += 1
+            tWins += won ? 1 : 0
         dir := 0
 
-opened = dir == 0 and (buy or sell)
-if opened
-    dir := buy ? 1 : -1
-    entry := close
-    r := atr * atrMult
-    sl := close - dir * r
-    hits := 0
-    tp3 = close + dir * 3 * r
-    win := box.new(bar_index, math.max(close, tp3), bar_index, math.min(close, tp3), border_color=na, bgcolor=color.new(color.green, 85))
-    loss := box.new(bar_index, math.max(close, sl), bar_index, math.min(close, sl), border_color=na, bgcolor=color.new(color.red, 85))
-    tag := label.new(bar_index, close, dir == 1 ? "B" : "S", color=color.gray, textcolor=color.white, style=label.style_label_right, size=size.tiny, tooltip="Entry " + str.tostring(close, format.mintick) + "\nSL " + str.tostring(sl, format.mintick) + "\nTP1 " + str.tostring(close + dir * r, format.mintick) + "\nTP2 " + str.tostring(close + dir * 2 * r, format.mintick) + "\nTP3 " + str.tostring(tp3, format.mintick))
-    boxes.push(win)
-    boxes.push(loss)
-    tags.push(tag)
-    if tags.size() > keep
-        box.delete(boxes.shift())
-        box.delete(boxes.shift())
-        label.delete(tags.shift())
+// open a new trade (news fade first, then trend)
+bool opened = false
+if dir == 0 and (fadeSig or trendBuy or trendSell) and not na(atr)
+    d = fadeSig ? fadeDir : trendBuy ? 1 : -1
+    fade = fadeSig
+    slPx = fade ? nTip - d * atr * fadeBuf : close - d * atr * atrMult
+    tpPx = fade ? nOther : close + d * 3 * atr * atrMult
+    if (d == 1 ? slPx < close and tpPx > close : slPx > close and tpPx < close)
+        opened := true
+        dir := d
+        isFade := fade
+        entry := close
+        sl := slPx
+        tp := tpPx
+        r := math.abs(close - slPx)
+        hits := 0
+        win := box.new(bar_index, math.max(close, tpPx), bar_index, math.min(close, tpPx), border_color=na, bgcolor=cWin)
+        loss := box.new(bar_index, math.max(close, slPx), bar_index, math.min(close, slPx), border_color=na, bgcolor=cLoss)
+        tipTxt = (fade ? "News fade " : "Trend ") + (d == 1 ? "BUY" : "SELL") + "\nEntry " + str.tostring(close, format.mintick) + "\nSL " + str.tostring(slPx, format.mintick) + (fade ? "\nTP " + str.tostring(tpPx, format.mintick) + " (news other end)" : "\nTP1 " + str.tostring(close + d * r, format.mintick) + "\nTP2 " + str.tostring(close + d * 2 * r, format.mintick) + "\nTP3 " + str.tostring(tpPx, format.mintick))
+        tag := label.new(bar_index, close, (fade ? "N" : "") + (d == 1 ? "B" : "S"), color=cMid, textcolor=color.white, style=label.style_label_right, size=size.tiny, tooltip=tipTxt)
+        boxes.push(win)
+        boxes.push(loss)
+        tags.push(tag)
+        if tags.size() > keep
+            box.delete(boxes.shift())
+            box.delete(boxes.shift())
+            label.delete(tags.shift())
 
-alertcondition(opened and buy, "Buy", "Sniper Mini: BUY")
-alertcondition(opened and sell, "Sell", "Sniper Mini: SELL")
+alertcondition(opened and dir == 1, "Buy", "Sniper Mini: BUY")
+alertcondition(opened and dir == -1, "Sell", "Sniper Mini: SELL")
+
+// ===== Dashboard: win rate per setup =====
+var table dash = table.new(position.top_right, 4, 5, bgcolor=color.new(#0B1E3A, 10), border_width=1, border_color=color.new(cMid, 50))
+f_row(int r0, string k, int n, int w) =>
+    table.cell(dash, 0, r0, k, text_color=cPale, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, r0, str.tostring(n), text_color=color.white, text_size=size.small)
+    table.cell(dash, 2, r0, str.tostring(w), text_color=color.white, text_size=size.small)
+    table.cell(dash, 3, r0, n > 0 ? str.tostring(w * 100.0 / n, "#") + "%" : "-", text_color=n > 0 and w * 2 >= n ? cLight : cPale, text_size=size.small)
+
+if barstate.islast
+    table.cell(dash, 0, 0, "Setup", text_color=cLight, text_size=size.small)
+    table.cell(dash, 1, 0, "Trades", text_color=cLight, text_size=size.small)
+    table.cell(dash, 2, 0, "Wins", text_color=cLight, text_size=size.small)
+    table.cell(dash, 3, 0, "Win rate", text_color=cLight, text_size=size.small)
+    f_row(1, "Trend (TP1+)", tTrades, tWins)
+    f_row(2, "News fade", nTrades, nWins)
+    f_row(3, "All", tTrades + nTrades, tWins + nWins)
+    table.cell(dash, 0, 4, (dir == 0 ? "Flat" : (isFade ? "In news fade " : "In trend ") + (dir == 1 ? "long" : "short")) + " | trend " + (fast > slow ? "up" : "down"), text_color=cPale, text_size=size.small, text_halign=text.align_left)
+    table.merge_cells(dash, 0, 4, 3, 4)
