@@ -19,11 +19,10 @@
 //             (reclaim direction) as a triple close (3 closes in that direction) or a candle bigger than the
 //             average consolidation candle x Big Candle. SL beyond the box (tip side) + buffer. TP = other end
 //             of the news candle. A new tip restarts the consolidation.
-// TREND ENGINE: "EMA 50/200" (pullback cross above) or "MATS": entry when the 2-bar SMA of close flips
-//             across the MATS line (ChartPrime), with the same HTF / volume / dial-in filters.
+// MATS      : ChartPrime's Moving Average Trend Sniper line, drawn for visual context only (no entries use it).
 // RANGE BREAKOUT: a range is a window (Range Length) whose height is compressed vs its own history
 //             (percentile rank), rotates around its midline, tests both edges and has little drift. Entry on a
-//             close beyond the range + buffer, optionally only with the MATS trend. SL = range midpoint
+//             close beyond the range + buffer, either direction. SL = range midpoint
 //             +/- buffer, TP = breakout edge + range height (measured move).
 // RESEARCH  : every entry records its conditions (volume, body, RSI, BB %B, risk, RR, range, news size, tip
 //             extension). The bottom table shows the winners' range and average vs the losers' average per setup;
@@ -32,9 +31,8 @@ indicator("Trend Sniper Mini [kasutufx]", shorttitle="Sniper Mini", overlay=true
 
 // ===== Inputs =====
 useTrend = input.bool(true, "Trend Entries", group="Trend")
-trendEngine = input.string("EMA 50/200", "Trend Engine", options=["EMA 50/200", "MATS"], group="Trend", tooltip="EMA 50/200 = pullback cross of the fast EMA in an EMA trend. MATS = entry when price flips across the MATS line.")
-matsLen = input.int(30, "MATS Length", minval=2, group="MATS (ChartPrime)")
-showMats = input.bool(true, "Show MATS Line", group="MATS (ChartPrime)")
+matsLen = input.int(30, "MATS Length", minval=2, group="MATS (ChartPrime, visual only)")
+showMats = input.bool(true, "Show MATS Line", group="MATS (ChartPrime, visual only)")
 useRange = input.bool(true, "Range Breakout Entries", group="Wyckoff Range Breakout")
 rgLen = input.int(20, "Range Length", minval=8, maxval=100, group="Wyckoff Range Breakout")
 rgComp = input.float(40, "Compression Percentile (max)", minval=5, maxval=95, step=5, group="Wyckoff Range Breakout", tooltip="Range height vs ATR, ranked against its own history. 40 = tighter than 60% of past windows.")
@@ -46,7 +44,6 @@ rgDrift = input.float(0.45, "Max Drift", minval=0.05, maxval=2, step=0.05, group
 rgCont = input.float(0.70, "Min Closes Inside", minval=0.4, maxval=1, step=0.05, group="Wyckoff Range Breakout")
 rgBuf = input.float(0.15, "Breakout Buffer (ATR)", minval=0, maxval=2, step=0.05, group="Wyckoff Range Breakout")
 rgMaxAge = input.int(200, "Max Range Age (candles)", minval=10, maxval=2000, group="Wyckoff Range Breakout")
-rgWithMats = input.bool(true, "Only Break in MATS Direction", group="Wyckoff Range Breakout")
 fastLen = input.int(50, "Fast EMA", group="Trend")
 slowLen = input.int(200, "Slow EMA", group="Trend")
 htfTF = input.timeframe("15", "HTF Trend (empty = off)", group="Trend")
@@ -207,12 +204,11 @@ if barstate.isconfirmed
             if upBrk or dnBrk
                 bd = upBrk ? 1 : -1
                 box.set_border_color(gBox, color.new(bd == 1 ? cLight : #5C6BC0, 20))
-                if not rgWithMats or (bd == 1 ? matsUp : not matsUp)
-                    rangeSig := true
-                    rangeDir := bd
-                    gMid = (gTop + gBot) / 2
-                    rangeSl := gMid - bd * rgBuf * atrRg
-                    rangeTp := bd == 1 ? gTop + (gTop - gBot) : gBot - (gTop - gBot)
+                rangeSig := true
+                rangeDir := bd
+                gMid = (gTop + gBot) / 2
+                rangeSl := gMid - bd * rgBuf * atrRg
+                rangeTp := bd == 1 ? gTop + (gTop - gBot) : gBot - (gTop - gBot)
     else if rgQualified
         gActive := true
         gTop := rgTop
@@ -226,13 +222,10 @@ htfRaw = request.security(syminfo.tickerid, htfTF == "" ? timeframe.period : htf
 htfDiff = htfTF == "" ? 0.0 : htfRaw
 volAvg = ta.sma(volume, 20)
 volOk = volMult == 0 or volume > volAvg * volMult
-useMatsEngine = trendEngine == "MATS"
 emaBuy = fast > slow and ta.crossover(close, fast)
 emaSell = fast < slow and ta.crossunder(close, fast)
-matsBuy = matsUp and not matsUp[1]
-matsSell = not matsUp and matsUp[1]
-trendBuy = useTrend and barstate.isconfirmed and (useMatsEngine ? matsBuy : emaBuy) and htfDiff >= 0 and volOk
-trendSell = useTrend and barstate.isconfirmed and (useMatsEngine ? matsSell : emaSell) and htfDiff <= 0 and volOk
+trendBuy = useTrend and barstate.isconfirmed and emaBuy and htfDiff >= 0 and volOk
+trendSell = useTrend and barstate.isconfirmed and emaSell and htfDiff <= 0 and volOk
 
 // ===== News fade signal =====
 rng = high - low
@@ -542,7 +535,7 @@ if barstate.islast
     f_row(3, "Sniper: News reclaim", stTrades.get(2), stWins.get(2), stR.get(2))
     f_row(4, "Wyckoff: Range breakout", stTrades.get(3), stWins.get(3), stR.get(3))
     f_row(5, "All", stTrades.get(0) + stTrades.get(1) + stTrades.get(2) + stTrades.get(3), stWins.get(0) + stWins.get(1) + stWins.get(2) + stWins.get(3), stR.get(0) + stR.get(1) + stR.get(2) + stR.get(3))
-    table.cell(dash, 0, 6, "Sniper " + f_state(pS) + " | Wyckoff " + f_state(pW) + " | trend " + ((useMatsEngine ? matsUp : fast > slow) ? "up" : "down"), text_color=cPale, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 6, "Sniper " + f_state(pS) + " | Wyckoff " + f_state(pW) + " | trend " + (fast > slow ? "up" : "down"), text_color=cPale, text_size=size.small, text_halign=text.align_left)
     table.merge_cells(dash, 0, 6, 5, 6)
     table.cell(dash, 0, 7, "R: loss = -1R. Trend scales out 1/3 at each TP, rest at SL.", text_color=cPale, text_size=size.tiny, text_halign=text.align_left)
     table.merge_cells(dash, 0, 7, 5, 7)
