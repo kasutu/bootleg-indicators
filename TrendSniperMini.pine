@@ -1,0 +1,74 @@
+//@version=6
+// Trend Sniper Mini [kasutufx]
+// Minimal trend-following entries with every past execution kept on the chart.
+// BUY  = fast EMA above slow EMA (+ HTF agrees) and price closes back above the fast EMA, volume above average.
+// SELL = mirror. SL = ATR x mult, TP1/TP2/TP3 = 1R/2R/3R. One trade at a time, ends at SL or TP3.
+indicator("Trend Sniper Mini [kasutufx]", shorttitle="Sniper Mini", overlay=true, max_boxes_count=300, max_labels_count=300)
+
+fastLen = input.int(50, "Fast EMA")
+slowLen = input.int(200, "Slow EMA")
+htfTF = input.timeframe("15", "HTF Trend (empty = off)")
+volMult = input.float(1.2, "Volume x Average (0 = off)", minval=0, step=0.1)
+atrMult = input.float(1.5, "SL ATR Multiplier", minval=0.1, step=0.1)
+keep = input.int(50, "Trades Shown", minval=1, maxval=150)
+
+fast = ta.ema(close, fastLen)
+slow = ta.ema(close, slowLen)
+atr = ta.atr(14)
+f_htf() => ta.ema(close, fastLen)[1] - ta.ema(close, slowLen)[1]
+htfRaw = request.security(syminfo.tickerid, htfTF == "" ? timeframe.period : htfTF, f_htf(), lookahead=barmerge.lookahead_on)
+htfDiff = htfTF == "" ? 0.0 : htfRaw
+volOk = volMult == 0 or volume > ta.sma(volume, 20) * volMult
+
+buy = barstate.isconfirmed and fast > slow and htfDiff >= 0 and ta.crossover(close, fast) and volOk
+sell = barstate.isconfirmed and fast < slow and htfDiff <= 0 and ta.crossunder(close, fast) and volOk
+
+plot(fast, "Fast EMA", color.new(color.green, 20))
+plot(slow, "Slow EMA", color.new(color.red, 20))
+
+// trade state
+var int dir = 0
+var float sl = na
+var float r = na
+var float entry = na
+var int hits = 0
+var box win = na
+var box loss = na
+var label tag = na
+var array<box> boxes = array.new<box>()
+var array<label> tags = array.new<label>()
+
+if dir != 0 and barstate.isconfirmed
+    stopped = dir == 1 ? low <= sl : high >= sl
+    if not stopped
+        for i = hits + 1 to 3
+            if dir == 1 ? high >= entry + i * r : low <= entry - i * r
+                hits := i
+    box.set_right(win, bar_index)
+    box.set_right(loss, bar_index)
+    if stopped or hits == 3
+        label.set_text(tag, label.get_text(tag) + (hits == 0 ? " SL" : " TP" + str.tostring(hits)))
+        label.set_color(tag, hits == 0 ? color.red : color.green)
+        dir := 0
+
+opened = dir == 0 and (buy or sell)
+if opened
+    dir := buy ? 1 : -1
+    entry := close
+    r := atr * atrMult
+    sl := close - dir * r
+    hits := 0
+    tp3 = close + dir * 3 * r
+    win := box.new(bar_index, math.max(close, tp3), bar_index, math.min(close, tp3), border_color=na, bgcolor=color.new(color.green, 85))
+    loss := box.new(bar_index, math.max(close, sl), bar_index, math.min(close, sl), border_color=na, bgcolor=color.new(color.red, 85))
+    tag := label.new(bar_index, close, dir == 1 ? "B" : "S", color=color.gray, textcolor=color.white, style=label.style_label_right, size=size.tiny, tooltip="Entry " + str.tostring(close, format.mintick) + "\nSL " + str.tostring(sl, format.mintick) + "\nTP1 " + str.tostring(close + dir * r, format.mintick) + "\nTP2 " + str.tostring(close + dir * 2 * r, format.mintick) + "\nTP3 " + str.tostring(tp3, format.mintick))
+    boxes.push(win)
+    boxes.push(loss)
+    tags.push(tag)
+    if tags.size() > keep
+        box.delete(boxes.shift())
+        box.delete(boxes.shift())
+        label.delete(tags.shift())
+
+alertcondition(opened and buy, "Buy", "Sniper Mini: BUY")
+alertcondition(opened and sell, "Sell", "Sniper Mini: SELL")
