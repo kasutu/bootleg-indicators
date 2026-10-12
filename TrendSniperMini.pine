@@ -49,9 +49,11 @@ fRRMin = input.float(0, "Min RR to Final TP (0 = off)", minval=0, step=0.1, grou
 // defaults tuned from the 15m XAUUSD results (winners vs losers); set to 0 to switch a filter off
 fSizeMin = input.float(3.0, "Min News Size x Prior (0 = off)", minval=0, step=0.1, group="Dial-in Filters (news fade)", tooltip="15m results: winners avg 3.86x, losers 2.73x.")
 fTipMax = input.float(1.0, "Max Tip Extension in ATR (0 = off)", minval=0, step=0.1, group="Dial-in Filters (news fade)", tooltip="15m results: winners avg 0.64 ATR, losers 0.87 ATR.")
-fFadeRiskMin = input.float(1.5, "Min Risk in ATR (0 = off)", minval=0, step=0.1, group="Dial-in Filters (news fade)", tooltip="15m results: winners avg 1.97 ATR, losers 1.37 ATR (tight stops got hit before the reclaim).")
-fFadeRngMin = input.float(1.5, "Min Entry Range in ATR (0 = off)", minval=0, step=0.1, group="Dial-in Filters (news fade)", tooltip="15m results: winners avg 1.95 ATR, losers 1.47 ATR (strong reversal candle).")
+fFadeRiskMin = input.float(0, "Min Risk in ATR (0 = off)", minval=0, step=0.1, group="Dial-in Filters (news fade)", tooltip="15m results: winners avg 1.97 ATR, losers 1.37 ATR. Off by default: together with the other fade filters it left only 3 trades.")
+fFadeRngMin = input.float(0, "Min Entry Range in ATR (0 = off)", minval=0, step=0.1, group="Dial-in Filters (news fade)", tooltip="15m results: winners avg 1.95 ATR, losers 1.47 ATR. Off by default: together with the other fade filters it left only 3 trades.")
 fTrendRngMax = input.float(1.6, "Max Entry Range in ATR (0 = off)", minval=0, step=0.1, group="Dial-in Filters (trend)", tooltip="15m results: winners avg 1.48 ATR, losers 1.75 ATR (stretched entry candles failed more).")
+fTrendRsiMin = input.float(52, "Min RSI, trade direction (0 = off)", minval=0, maxval=100, group="Dial-in Filters (trend)", tooltip="15m results: winners avg 56.6, losers 51.7. Longs use RSI, shorts 100 - RSI.")
+fTrendPctBMin = input.float(0.55, "Min BB %B, trade direction (-1 = off)", minval=-1, step=0.05, group="Dial-in Filters (trend)", tooltip="15m results: winners avg 0.68, losers 0.54. Longs use %B, shorts 1 - %B.")
 
 // ===== Blue palette =====
 cLight = #64B5F6
@@ -234,7 +236,7 @@ if dir == 0 and (fadeSig or trendBuy or trendSell) and not na(atr)
     rsiD = d == 1 ? rsi : 100 - rsi
     pctBD = d == 1 ? pctB : 1 - pctB
     rngA = rngE / atr
-    setupOk = fade ? (fFadeRiskMin == 0 or riskA >= fFadeRiskMin) and (fFadeRngMin == 0 or rngA >= fFadeRngMin) : (fTrendRngMax == 0 or rngA <= fTrendRngMax)
+    setupOk = fade ? (fFadeRiskMin == 0 or riskA >= fFadeRiskMin) and (fFadeRngMin == 0 or rngA >= fFadeRngMin) : (fTrendRngMax == 0 or rngA <= fTrendRngMax) and (fTrendRsiMin == 0 or rsiD >= fTrendRsiMin) and (fTrendPctBMin == -1 or pctBD >= fTrendPctBMin)
     passF = setupOk and (fVolMin == 0 or volR >= fVolMin) and (fBodyMin == 0 or bodyE >= fBodyMin) and rsiD >= fRsiMin and rsiD <= fRsiMax and pctBD >= fPctBMin and pctBD <= fPctBMax and (fRiskMin == 0 or riskA >= fRiskMin) and (fRiskMax == 0 or riskA <= fRiskMax) and (fRngMin == 0 or rngA >= fRngMin) and (fRngMax == 0 or rngA <= fRngMax) and (fRRMin == 0 or rr >= fRRMin) and (not fade or fSizeMin == 0 or nSize >= fSizeMin) and (not fade or fTipMax == 0 or tipExt <= fTipMax)
     if passF and (d == 1 ? slPx < close and tpPx > close : slPx > close and tpPx < close)
         opened := true
