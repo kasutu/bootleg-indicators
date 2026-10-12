@@ -8,6 +8,11 @@
 // BOTTOM = 4 consecutive bearish candles, ending with an indecision (doji) candle
 //          + RSI below 30
 //          + price extension: the run makes a new low below the previous N candles (replaces Bollinger Bands)
+//
+// NEWS   = a news candle (range at least X times the largest candle of the previous N candles, mostly body,
+//          optionally only inside a news time window) followed within a few candles by a doji:
+//          bullish news candle -> NEWS TOP, bearish news candle -> NEWS BOTTOM.
+//          Pine has no economic calendar, so news candles are detected from price (and the optional time window).
 indicator("Top Bottom Reversal [kasutufx]", shorttitle="TB Reversal", overlay=true, max_labels_count=500, max_boxes_count=500)
 
 // ===== Inputs =====
@@ -19,6 +24,15 @@ rsiHi = input.float(70, "Overbought", group="RSI")
 rsiLo = input.float(30, "Oversold", group="RSI")
 useExt = input.bool(true, "Use Price Extension", group="Price Extension", tooltip="Replaces Bollinger Bands: the run must make a new high (top) / new low (bottom) versus the candles before it.")
 extLen = input.int(20, "Extension Lookback", minval=2, group="Price Extension")
+useNews = input.bool(true, "Use News Candles", group="News")
+newsMult = input.float(2.0, "News Candle Size (x largest prior range)", minval=1, step=0.1, group="News", tooltip="News candle range must be at least this many times the largest high-low range of the previous News Lookback candles.")
+newsLen = input.int(20, "News Lookback", minval=2, group="News")
+newsBody = input.float(50, "News Candle Min Body %", minval=0, maxval=100, group="News", tooltip="Body must be at least this % of the range (a real push, not just wicks).")
+newsWait = input.int(3, "Doji Within (candles)", minval=1, maxval=10, group="News", tooltip="The doji must form within this many candles after the news candle.")
+useNewsTime = input.bool(false, "Only Inside News Time Window", group="News")
+newsSess = input.session("0830-0900", "News Time Window", group="News", tooltip="Eg. 0830-0900 New York covers NFP / CPI releases.")
+newsTz = input.string("America/New_York", "Window Timezone", group="News")
+showNews = input.bool(true, "Mark News Candles", group="News")
 showBox = input.bool(true, "Show Signal Box", group="Display")
 
 // ===== Conditions =====
@@ -45,7 +59,29 @@ extBtm = not useExt or runLow < ta.lowest(low, extLen)[runLen + 1]
 topSig = barstate.isconfirmed and doji and upRun and rsiTop and extTop
 btmSig = barstate.isconfirmed and doji and dnRun and rsiBtm and extBtm
 
+// News candle: outsized range vs the previous candles, mostly body, optional time window
+inNewsTime = not useNewsTime or not na(time(timeframe.period, newsSess + ":1234567", newsTz))
+priorMaxRng = ta.highest(rng, newsLen)[1]
+newsCandle = useNews and rng >= newsMult * priorMaxRng and math.abs(close - open) >= rng * newsBody / 100 and inNewsTime
+var int newsBar = na
+var int newsDir = 0
+if barstate.isconfirmed and newsCandle
+    newsBar := bar_index
+    newsDir := bull ? 1 : -1
+newsAge = bar_index - newsBar
+newsTop = barstate.isconfirmed and newsDir == 1 and doji and newsAge >= 1 and newsAge <= newsWait
+newsBtm = barstate.isconfirmed and newsDir == -1 and doji and newsAge >= 1 and newsAge <= newsWait
+if newsTop or newsBtm or (newsDir != 0 and newsAge > newsWait)
+    newsDir := 0
+
 // ===== Visuals =====
+if showNews and barstate.isconfirmed and newsCandle
+    label.new(bar_index, bull ? low : high, "N", color=color.new(color.yellow, 20), textcolor=color.black, style=bull ? label.style_label_up : label.style_label_down, size=size.tiny, tooltip="News candle: range " + str.tostring(rng / priorMaxRng, "#.#") + "x the largest of the previous " + str.tostring(newsLen))
+if newsTop
+    label.new(bar_index, high, "▼", color=color(na), textcolor=color.orange, style=label.style_label_down, size=size.normal, tooltip="NEWS TOP: doji " + str.tostring(newsAge) + " candle(s) after a bullish news candle")
+if newsBtm
+    label.new(bar_index, low, "▲", color=color(na), textcolor=color.orange, style=label.style_label_up, size=size.normal, tooltip="NEWS BOTTOM: doji " + str.tostring(newsAge) + " candle(s) after a bearish news candle")
+
 if topSig
     if showBox
         box.new(bar_index - runLen, runHigh, bar_index, runLow, border_color=color.new(color.red, 40), bgcolor=color.new(color.red, 80))
@@ -57,3 +93,6 @@ if btmSig
 
 alertcondition(topSig, "Top", "Top Bottom Reversal: TOP")
 alertcondition(btmSig, "Bottom", "Top Bottom Reversal: BOTTOM")
+alertcondition(newsCandle and barstate.isconfirmed, "News Candle", "Top Bottom Reversal: news candle")
+alertcondition(newsTop, "News Top", "Top Bottom Reversal: NEWS TOP")
+alertcondition(newsBtm, "News Bottom", "Top Bottom Reversal: NEWS BOTTOM")
