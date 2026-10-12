@@ -46,30 +46,30 @@ def percent_text(value: float) -> str:
 def preset_bullish(preset: str, custom: Color) -> Color:
     result = custom
     if preset == 'Classic':
-        result = color.hex('#00ff00')
+        result = color.rgba(0, 255, 0, 1.0)
     elif preset == 'Aqua':
-        result = color.hex('#00d4ff')
+        result = color.rgba(0, 212, 255, 1.0)
     elif preset == 'Cosmic':
-        result = color.hex('#49ffce')
+        result = color.rgba(73, 255, 206, 1.0)
     elif preset == 'Cyber':
-        result = color.hex('#00cccc')
+        result = color.rgba(0, 204, 204, 1.0)
     elif preset == 'Neon':
-        result = color.hex('#ffff00')
+        result = color.rgba(255, 255, 0, 1.0)
     return result
 
 
 def preset_bearish(preset: str, custom: Color) -> Color:
     result = custom
     if preset == 'Classic':
-        result = color.hex('#ff0000')
+        result = color.rgba(255, 0, 0, 1.0)
     elif preset == 'Aqua':
-        result = color.hex('#ff8c00')
+        result = color.rgba(255, 140, 0, 1.0)
     elif preset == 'Cosmic':
-        result = color.hex('#9932cc')
+        result = color.rgba(153, 50, 204, 1.0)
     elif preset == 'Cyber':
-        result = color.hex('#ff6600')
+        result = color.rgba(255, 102, 0, 1.0)
     elif preset == 'Neon':
-        result = color.hex('#ff00ff')
+        result = color.rgba(255, 0, 255, 1.0)
     return result
 
 
@@ -217,8 +217,8 @@ class ScanWindow(Algorithm):
 @param.int('max_range_age', default=0, min=0, max=2000, title='Max Range Age')
 # ════════ Visual Settings ════════
 @param.str('color_preset', default='Custom', options=['Classic', 'Aqua', 'Cosmic', 'Cyber', 'Neon', 'Custom'], title='Color Preset')
-@param.color('bullish_input', default=color.hex('#00ffaa'), title='Bullish Color')
-@param.color('bearish_input', default=color.hex('#ff0000'), title='Bearish Color')
+@param.color('bullish_input', default=color.rgba(0, 255, 170, 1.0), title='Bullish Color')
+@param.color('bearish_input', default=color.rgba(255, 0, 0, 1.0), title='Bearish Color')
 @param.color('range_input', default=color.GRAY, title='Range Color')
 @param.color('marker_text_color', default=color.BLACK, title='Marker Text Color')
 @param.int('gradient_steps', default=4, min=1, max=10, title='Gradient Steps')
