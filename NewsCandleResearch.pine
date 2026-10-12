@@ -7,10 +7,14 @@
 //               (optional time window). Pine has no economic calendar, so news is detected from price.
 // Other end   : bullish news candle -> its low (or open), bearish -> its high (or open).
 // Return candle: the first later candle that trades back to the other end (within Max Wait candles).
+// Tip        : the marked range, from the news candle close to the furthest point past it before the return.
+//               The tip candle is the candle that made that extreme, where the reclaim starts.
 // Studied     : how often / how fast price returns, the return candle's body composition (direction, body %,
-//               wicks, close beyond the end) and pattern, and volume, RSI and Bollinger Bands at both candles.
-// Pattern     : return candle, checked in this order: Engulfing (against the news, body engulfs the previous
-//               body), Marubozu (body >= 80%), Pin bar (wick toward the end >= 60%), Doji (body <= 10%), Normal.
+//               wicks, close beyond the end), volume, RSI and Bollinger Bands, and the tip candle pattern.
+// Tip pattern : checked in this order (reversal = against the news direction):
+//               News candle (no extension past it), Engulfing (reversal body engulfs the previous body),
+//               Pin bar (wick into the tip >= 60%), Doji (body <= 10%), Marubozu (reversal body >= 80%),
+//               Reversal body (closes against the news), With-news body (closes in the news direction).
 indicator("News Candle Research [kasutufx]", shorttitle="News Research", overlay=true, max_labels_count=500, max_boxes_count=500)
 
 // ===== Inputs =====
@@ -64,6 +68,9 @@ f_study() =>
     var int rMaru = 0
     var int rPin = 0
     var int rDoji = 0
+    var int rRevB = 0
+    var int rWithB = 0
+    var int rNewsT = 0
     // pending news candle
     var int pDir = 0
     var float pEnd = na
@@ -73,6 +80,13 @@ f_study() =>
     var int pTipT = na
     var float pNewsC = na
     var int pNewsT = na
+    // tip candle OHLC and the candle before it
+    var float tO = na
+    var float tH = na
+    var float tL = na
+    var float tC = na
+    var float tPO = na
+    var float tPC = na
     // latest news candle and latest completed return, for the chart marks
     var int curNT = na
     var float curNY = na
@@ -85,7 +99,9 @@ f_study() =>
     var int lastRetT = na
     var float lastRetY = na
     var bool lastRetAbove = false
-    var string retCode = ""
+    var string tipCode = ""
+    var string tipTip = ""
+    var bool lastTipAbove = false
     var string retTip = ""
     bool evRet = false
     int age = 0
@@ -99,6 +115,12 @@ f_study() =>
         if pDir == 1 ? high > pTipPx : low < pTipPx
             pTipPx := pDir == 1 ? high : low
             pTipT := time
+            tO := open
+            tH := high
+            tL := low
+            tC := close
+            tPO := open[1]
+            tPC := close[1]
         if pDir == 1 ? low <= pEnd : high >= pEnd
             evRet := true
             rCnt += 1
@@ -112,15 +134,23 @@ f_study() =>
             rVol += nz(volR)
             rRsi += nz(rsi)
             rPierce += (pDir == 1 ? low < dn : high > up) ? 1 : 0
-            // candle pattern of the return candle
             bodyP = rng > 0 ? (bodyTop - bodyBot) / rng * 100 : 0
-            wickToP = rng > 0 ? (pDir == 1 ? bodyBot - low : high - bodyTop) / rng * 100 : 0
-            engulf = against and bodyTop >= math.max(open[1], close[1]) and bodyBot <= math.min(open[1], close[1]) and (bodyTop - bodyBot) > math.abs(close[1] - open[1])
-            pat := engulf ? "Engulfing" : bodyP >= 80 ? "Marubozu" : wickToP >= 60 ? "Pin bar" : bodyP <= 10 ? "Doji" : "Normal"
+            // pattern of the tip candle (the candle that made the extreme of the marked range)
+            tRng = tH - tL
+            tTop = math.max(tO, tC)
+            tBot = math.min(tO, tC)
+            tBodyP = tRng > 0 ? (tTop - tBot) / tRng * 100 : 0
+            tWickP = tRng > 0 ? (pDir == 1 ? tH - tTop : tBot - tL) / tRng * 100 : 0
+            tRev = pDir == 1 ? tC < tO : tC > tO
+            tEng = tRev and tTop >= math.max(tPO, tPC) and tBot <= math.min(tPO, tPC) and (tTop - tBot) > math.abs(tPC - tPO)
+            pat := pTipT == pNewsT ? "News candle" : tEng ? "Engulfing" : tWickP >= 60 ? "Pin bar" : tBodyP <= 10 ? "Doji" : tRev and tBodyP >= 80 ? "Marubozu" : tRev ? "Reversal body" : "With-news body"
             rEng += pat == "Engulfing" ? 1 : 0
             rMaru += pat == "Marubozu" ? 1 : 0
             rPin += pat == "Pin bar" ? 1 : 0
             rDoji += pat == "Doji" ? 1 : 0
+            rRevB += pat == "Reversal body" ? 1 : 0
+            rWithB += pat == "With-news body" ? 1 : 0
+            rNewsT += pat == "News candle" ? 1 : 0
             leg := legAgainst
             lastNT := pNewsT
             lastNC := pNewsC
@@ -129,10 +159,12 @@ f_study() =>
             lastRetT := time
             lastRetAbove := close > open
             lastRetY := lastRetAbove ? high : low
-            retCode := pat == "Engulfing" ? "ENG" : pat == "Marubozu" ? "MARU" : pat == "Pin bar" ? "PIN" : pat == "Doji" ? "DOJI" : "R"
+            tipCode := pat == "Engulfing" ? "ENG" : pat == "Marubozu" ? "MARU" : pat == "Pin bar" ? "PIN" : pat == "Doji" ? "DOJI" : pat == "Reversal body" ? "REV" : pat == "With-news body" ? "WITH" : "NEWS"
+            lastTipAbove := pDir == 1
+            tipTip := "Tip candle: " + pat + "\n" + (tC > tO ? "Bullish" : tC < tO ? "Bearish" : "Doji") + " | body " + str.tostring(tBodyP, "#") + "% | wick into tip " + str.tostring(tWickP, "#") + "%\nTip " + str.tostring(pTipPx, format.mintick)
             upW = rng > 0 ? (high - bodyTop) / rng * 100 : 0
             loW = rng > 0 ? (bodyBot - low) / rng * 100 : 0
-            retTip := "Return candle: " + pat + " (" + str.tostring(age) + " candles after news, " + str.tostring(legAgainst) + " against the news)\n" + (close > open ? "Bullish" : close < open ? "Bearish" : "Doji") + " | body " + str.tostring(bodyP, "#") + "%\nUpper wick " + str.tostring(upW, "#") + "% | lower wick " + str.tostring(loW, "#") + "%\nVolume " + str.tostring(volR, "#.#") + "x avg | RSI " + str.tostring(rsi, "#.#") + "\nTip " + str.tostring(pTipPx, format.mintick)
+            retTip := "Return candle (" + str.tostring(age) + " candles after news, " + str.tostring(legAgainst) + " against the news)\n" + (close > open ? "Bullish" : close < open ? "Bearish" : "Doji") + " | body " + str.tostring(bodyP, "#") + "%\nUpper wick " + str.tostring(upW, "#") + "% | lower wick " + str.tostring(loW, "#") + "%\nVolume " + str.tostring(volR, "#.#") + "x avg | RSI " + str.tostring(rsi, "#.#") + "\nTip " + str.tostring(pTipPx, format.mintick)
             pDir := 0
         else if age >= maxWait
             pDir := 0
@@ -156,11 +188,17 @@ f_study() =>
         curNDir := d
         curNY := d == 1 ? low : high
         newsTip := "News candle (" + timeframe.period + ")\nVolume " + str.tostring(volR, "#.#") + "x avg\nRSI " + str.tostring(rsi, "#.#")
-    [nCnt, nVol, nRsi, nOut, rCnt, rBars, rCounter, rBody, rWickTo, rWickAway, rBeyond, rVol, rRsi, rPierce, rEng, rMaru, rPin, rDoji, curNT, curNY, curNDir, newsTip, lastNT, lastNC, lastTipT, lastTipPx, lastRetT, lastRetY, lastRetAbove, retCode, retTip]
+        tO := open
+        tH := high
+        tL := low
+        tC := close
+        tPO := open[1]
+        tPC := close[1]
+    [nCnt, nVol, nRsi, nOut, rCnt, rBars, rCounter, rBody, rWickTo, rWickAway, rBeyond, rVol, rRsi, rPierce, rEng, rMaru, rPin, rDoji, rRevB, rWithB, rNewsT, curNT, curNY, curNDir, newsTip, lastNT, lastNC, lastTipT, lastTipPx, lastRetT, lastRetY, lastRetAbove, tipCode, tipTip, lastTipAbove, retTip]
 
-[a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, aNT, aNY, aND, aNTip, aLNT, aLNC, aTipT, aTipPx, aRT, aRY, aRA, aRC, aRTip] = request.security(syminfo.tickerid, "5", f_study())
-[b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17, bNT, bNY, bND, bNTip, bLNT, bLNC, bTipT, bTipPx, bRT, bRY, bRA, bRC, bRTip] = request.security(syminfo.tickerid, "15", f_study())
-[c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15, c16, c17, cNT, cNY, cND, cNTip, cLNT, cLNC, cTipT, cTipPx, cRT, cRY, cRA, cRC, cRTip] = f_study()
+[a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, aNT, aNY, aND, aNTip, aLNT, aLNC, aTipT, aTipPx, aRT, aRY, aRA, aTC, aTTip, aTA, aRTip] = request.security(syminfo.tickerid, "5", f_study())
+[b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17, b18, b19, b20, bNT, bNY, bND, bNTip, bLNT, bLNC, bTipT, bTipPx, bRT, bRY, bRA, bTC, bTTip, bTA, bRTip] = request.security(syminfo.tickerid, "15", f_study())
+[c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15, c16, c17, c18, c19, c20, cNT, cNY, cND, cNTip, cLNT, cLNC, cTipT, cTipPx, cRT, cRY, cRA, cTC, cTTip, cTA, cRTip] = f_study()
 
 // ===== Chart marks (from the selected timeframe, placed by time) =====
 use15 = markSrc == "15m"
@@ -178,7 +216,9 @@ mTipPx = use15 ? bTipPx : use5 ? aTipPx : cTipPx
 mRT = use15 ? bRT : use5 ? aRT : cRT
 mRY = use15 ? bRY : use5 ? aRY : cRY
 mRA = use15 ? bRA : use5 ? aRA : cRA
-mRC = use15 ? bRC : use5 ? aRC : cRC
+mTC = use15 ? bTC : use5 ? aTC : cTC
+mTTip = use15 ? bTTip : use5 ? aTTip : cTTip
+mTA = use15 ? bTA : use5 ? aTA : cTA
 mRTip = use15 ? bRTip : use5 ? aRTip : cRTip
 
 if showMarks and mNewsCnt > nz(mNewsCnt[1]) and not na(mNT)
@@ -186,16 +226,18 @@ if showMarks and mNewsCnt > nz(mNewsCnt[1]) and not na(mNT)
 if showMarks and mRetCnt > nz(mRetCnt[1]) and not na(mRT)
     // tip: from the news candle close to the furthest point past it, news candle -> extreme candle
     box.new(mLNT, math.max(mLNC, mTipPx), mTipT, math.min(mLNC, mTipPx), xloc=xloc.bar_time, border_color=color.new(color.aqua, 30), bgcolor=color.new(color.aqua, 80))
-    label.new(mRT, mRY, mRC, xloc=xloc.bar_time, color=color.new(color.aqua, 20), textcolor=color.black, style=mRA ? label.style_label_down : label.style_label_up, size=size.tiny, tooltip=mRTip)
+    // tip candle pattern at the extreme, small R where the news candle was reclaimed
+    label.new(mTipT, mTipPx, mTC, xloc=xloc.bar_time, color=color.new(color.aqua, 20), textcolor=color.black, style=mTA ? label.style_label_down : label.style_label_up, size=size.tiny, tooltip=mTTip)
+    label.new(mRT, mRY, "R", xloc=xloc.bar_time, color=color(na), textcolor=color.aqua, style=mRA ? label.style_label_down : label.style_label_up, size=size.tiny, tooltip=mRTip)
 
 // ===== Dashboard =====
 f_pct(float part, float whole) => whole > 0 ? str.tostring(part / whole * 100, "#") + "%" : "-"
 f_avg(float sum, float n, string fmt) => n > 0 ? str.tostring(sum / n, fmt) : "-"
 
-var table tbl = table.new(position.top_right, 4, 21, bgcolor=color.new(color.black, 15), border_width=1, border_color=color.gray)
+var table tbl = table.new(position.top_right, 4, 24, bgcolor=color.new(color.black, 15), border_width=1, border_color=color.gray)
 f_cell(int c, int r, string txt, color col) =>
     table.cell(tbl, c, r, txt, text_color=col, text_size=size.small, text_halign=c == 0 ? text.align_left : text.align_right)
-f_col(int c, string head, float n0, float n1, float n2, float n3, float r0, float r1, float r2, float r3, float r4, float r5, float r6, float r7, float r8, float r9, float p0, float p1, float p2, float p3) =>
+f_col(int c, string head, float n0, float n1, float n2, float n3, float r0, float r1, float r2, float r3, float r4, float r5, float r6, float r7, float r8, float r9, float p0, float p1, float p2, float p3, float p4, float p5, float p6) =>
     f_cell(c, 0, head, color.yellow)
     f_cell(c, 1, str.tostring(n0), color.white)
     f_cell(c, 2, f_avg(n1, n0, "#.#") + "x", color.white)
@@ -215,14 +257,17 @@ f_col(int c, string head, float n0, float n1, float n2, float n3, float r0, floa
     f_cell(c, 16, f_pct(p1, r0), color.aqua)
     f_cell(c, 17, f_pct(p2, r0), color.aqua)
     f_cell(c, 18, f_pct(p3, r0), color.aqua)
+    f_cell(c, 19, f_pct(p4, r0), color.aqua)
+    f_cell(c, 20, f_pct(p5, r0), color.aqua)
+    f_cell(c, 21, f_pct(p6, r0), color.aqua)
 
 if barstate.islast
-    rows = array.from("News candles", "News volume (x avg)", "News RSI (avg)", "News close outside BB", "Returned to other end", "Candles to return (avg)", "Return candle against news", "Return body % (avg)", "Wick toward end % (avg)", "Wick other side % (avg)", "Return closed beyond end", "Return volume (x avg)", "Return RSI (avg)", "Return wick outside BB", "Pattern: Engulfing", "Pattern: Marubozu", "Pattern: Pin bar", "Pattern: Doji")
+    rows = array.from("News candles", "News volume (x avg)", "News RSI (avg)", "News close outside BB", "Returned to other end", "Candles to return (avg)", "Return candle against news", "Return body % (avg)", "Wick toward end % (avg)", "Wick other side % (avg)", "Return closed beyond end", "Return volume (x avg)", "Return RSI (avg)", "Return wick outside BB", "Tip: Engulfing", "Tip: Marubozu", "Tip: Pin bar", "Tip: Doji", "Tip: Reversal body", "Tip: With-news body", "Tip: News candle itself")
     f_cell(0, 0, "Metric", color.yellow)
     for i = 0 to rows.size() - 1
         f_cell(0, i + 1, rows.get(i), color.gray)
-    f_col(1, "5m", a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17)
-    f_col(2, "15m", b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17)
-    f_col(3, "Chart " + timeframe.period, c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15, c16, c17)
-    f_cell(0, 19, "Other end: " + endMode + " | max wait " + str.tostring(maxWait), color.gray)
-    f_cell(0, 20, "Counts cover the history loaded on each TF", color.gray)
+    f_col(1, "5m", a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20)
+    f_col(2, "15m", b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17, b18, b19, b20)
+    f_col(3, "Chart " + timeframe.period, c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15, c16, c17, c18, c19, c20)
+    f_cell(0, 22, "Other end: " + endMode + " | max wait " + str.tostring(maxWait), color.gray)
+    f_cell(0, 23, "Counts cover the history loaded on each TF", color.gray)
