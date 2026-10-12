@@ -1,0 +1,152 @@
+//@version=6
+// Trend Pullback Sniper [kasutufx]
+// Trend-continuation entries with every historical execution drawn on the chart.
+//
+// Rules
+// 1. Trend: fast EMA above / below slow EMA on the chart, optionally confirmed by the same EMAs on a higher
+//    timeframe (closed HTF bars only, no repaint).
+// 2. Entry: in an up-trend, a candle closes back above the fast EMA after being below it (pullback over).
+//    Mirror for shorts. Optional volume filter: volume above its average x multiplier.
+// 3. SL = entry -/+ ATR x multiplier. Targets at 1R, 2R and 3R.
+// 4. One trade at a time. The trade ends at the SL or TP3. Optional SL to entry once TP1 is hit.
+//    Result = highest target reached before the exit (SL = no target reached).
+// 5. Grade: A = strong volume and EMA spread > 1 ATR, B = strong volume, C = otherwise.
+//
+// Performance: one higher-timeframe request, drawings created only when a trade opens or closes,
+// the open trade only moves 2 box edges per bar, and old trades beyond "Trades Shown" are deleted.
+indicator("Trend Pullback Sniper [kasutufx]", shorttitle="TP Sniper", overlay=true, max_boxes_count=500, max_labels_count=500, max_lines_count=500)
+
+// ===== Inputs =====
+emaFastLen = input.int(50, "Fast EMA", minval=1, group="Trend")
+emaSlowLen = input.int(200, "Slow EMA", minval=1, group="Trend")
+useHTF = input.bool(true, "Use Higher Timeframe Trend", group="Trend")
+htfTF = input.timeframe("15", "HTF Timeframe", group="Trend")
+useVol = input.bool(true, "Use Volume Filter", group="Filters")
+volLen = input.int(20, "Volume Average Length", minval=1, group="Filters")
+volMult = input.float(1.2, "Volume Strength Multiplier", minval=0, step=0.1, group="Filters")
+atrLen = input.int(14, "ATR Length", minval=1, group="Risk")
+atrMult = input.float(1.5, "SL ATR Multiplier", minval=0.1, step=0.1, group="Risk")
+beAfterTp1 = input.bool(false, "Move SL to Entry After TP1", group="Risk")
+maxShown = input.int(50, "Trades Shown", minval=1, maxval=150, group="Display", tooltip="Past trades kept on the chart. Older ones are deleted to keep the chart fast.")
+showDash = input.bool(true, "Show Dashboard", group="Display")
+colFast = input.color(color.rgb(46, 160, 67), "Fast EMA", inline="ema", group="Display")
+colSlow = input.color(color.rgb(200, 40, 40), "Slow EMA", inline="ema", group="Display")
+
+// ===== Core =====
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+atrVal = ta.atr(atrLen)
+f_htf() => [ta.ema(close, emaFastLen)[1], ta.ema(close, emaSlowLen)[1]]
+[htfFast, htfSlow] = request.security(syminfo.tickerid, htfTF, f_htf(), lookahead=barmerge.lookahead_on)
+htfBull = htfFast > htfSlow
+htfBear = htfFast < htfSlow
+strongVol = volume > ta.sma(volume, volLen) * volMult
+bullTrend = emaFast > emaSlow
+bearTrend = emaFast < emaSlow
+spread = math.abs(emaFast - emaSlow)
+grade = strongVol and spread > atrVal ? "A" : strongVol ? "B" : "C"
+
+longSig = barstate.isconfirmed and bullTrend and ta.crossover(close, emaFast) and (not useHTF or htfBull) and (not useVol or strongVol)
+shortSig = barstate.isconfirmed and bearTrend and ta.crossunder(close, emaFast) and (not useHTF or htfBear) and (not useVol or strongVol)
+
+// ===== Trades =====
+type Trade
+    int dir
+    float entry
+    float sl
+    float tp1
+    float tp2
+    float tp3
+    int hits = 0
+    box win
+    box loss
+    line l1
+    line l2
+    label tag
+
+var array<Trade> history = array.new<Trade>()
+var Trade cur = na
+var int total = 0
+var int winners = 0
+var int tp3s = 0
+
+f_drop(Trade t) =>
+    box.delete(t.win)
+    box.delete(t.loss)
+    line.delete(t.l1)
+    line.delete(t.l2)
+    label.delete(t.tag)
+
+f_stretch(Trade t, int x) =>
+    box.set_right(t.win, x)
+    box.set_right(t.loss, x)
+    line.set_x2(t.l1, x)
+    line.set_x2(t.l2, x)
+
+// Manage the open trade (from the candle after entry; SL checked before targets)
+if not na(cur) and barstate.isconfirmed and bar_index > box.get_left(cur.win)
+    d = cur.dir
+    bool done = false
+    if d == 1 ? low <= cur.sl : high >= cur.sl
+        done := true
+    else
+        if cur.hits < 1 and (d == 1 ? high >= cur.tp1 : low <= cur.tp1)
+            cur.hits := 1
+            if beAfterTp1
+                cur.sl := cur.entry
+        if cur.hits < 2 and (d == 1 ? high >= cur.tp2 : low <= cur.tp2)
+            cur.hits := 2
+        if d == 1 ? high >= cur.tp3 : low <= cur.tp3
+            cur.hits := 3
+            done := true
+    f_stretch(cur, bar_index)
+    if done
+        res = cur.hits == 0 ? "SL" : "TP" + str.tostring(cur.hits)
+        col = cur.hits == 0 ? color.red : cur.hits == 3 ? color.lime : color.green
+        label.set_text(cur.tag, label.get_text(cur.tag) + " → " + res)
+        label.set_color(cur.tag, col)
+        total += 1
+        winners += cur.hits > 0 ? 1 : 0
+        tp3s += cur.hits == 3 ? 1 : 0
+        cur := na
+
+// Open a new trade
+bool evBuy = false
+bool evSell = false
+if na(cur) and (longSig or shortSig) and not na(atrVal)
+    d = longSig ? 1 : -1
+    r = atrVal * atrMult
+    t = Trade.new(d, close, close - d * r, close + d * r, close + d * 2 * r, close + d * 3 * r)
+    t.win := box.new(bar_index, math.max(close, t.tp3), bar_index + 1, math.min(close, t.tp3), border_color=color.new(color.green, 70), bgcolor=color.new(color.green, 85))
+    t.loss := box.new(bar_index, math.max(close, t.sl), bar_index + 1, math.min(close, t.sl), border_color=color.new(color.red, 70), bgcolor=color.new(color.red, 85))
+    t.l1 := line.new(bar_index, t.tp1, bar_index + 1, t.tp1, color=color.new(color.green, 50), style=line.style_dotted)
+    t.l2 := line.new(bar_index, t.tp2, bar_index + 1, t.tp2, color=color.new(color.green, 50), style=line.style_dotted)
+    tip = (d == 1 ? "BUY" : "SELL") + " (" + grade + ")\nEntry: " + str.tostring(close, format.mintick) + "\nSL: " + str.tostring(t.sl, format.mintick) + "\nTP1: " + str.tostring(t.tp1, format.mintick) + "\nTP2: " + str.tostring(t.tp2, format.mintick) + "\nTP3: " + str.tostring(t.tp3, format.mintick)
+    t.tag := label.new(bar_index, d == 1 ? low : high, (d == 1 ? "B " : "S ") + grade, color=color.new(color.gray, 20), textcolor=color.white, style=d == 1 ? label.style_label_up : label.style_label_down, size=size.tiny, tooltip=tip)
+    cur := t
+    evBuy := d == 1
+    evSell := d == -1
+    history.push(t)
+    if history.size() > maxShown
+        f_drop(history.shift())
+
+alertcondition(evBuy, "Buy", "Trend Pullback Sniper: BUY")
+alertcondition(evSell, "Sell", "Trend Pullback Sniper: SELL")
+
+// ===== EMAs =====
+plot(emaFast, "Fast EMA", color=colFast)
+plot(emaSlow, "Slow EMA", color=colSlow)
+
+// ===== Dashboard =====
+var table dash = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 20), border_width=1, border_color=color.gray)
+f_row(r, k, v, c) =>
+    table.cell(dash, 0, r, k, text_color=color.white, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 1, r, v, text_color=c, text_size=size.small, text_halign=text.align_right)
+
+if showDash and barstate.islast
+    f_row(0, "TREND", bullTrend ? "BULLISH" : "BEARISH", bullTrend ? color.green : color.red)
+    f_row(1, "HTF " + htfTF, htfBull ? "BULL" : "BEAR", htfBull ? color.green : color.red)
+    f_row(2, "VOLUME", strongVol ? "HIGH" : "LOW", strongVol ? color.green : color.orange)
+    f_row(3, "QUALITY", grade, color.yellow)
+    f_row(4, "TRADES (TP1+ / TP3)", str.tostring(total) + " (" + str.tostring(winners) + " / " + str.tostring(tp3s) + ")", color.white)
+    f_row(5, "HIT RATE TP1+", total > 0 ? str.tostring(winners * 100.0 / total, "#.#") + "%" : "-", total > 0 and winners * 2 >= total ? color.green : color.red)
