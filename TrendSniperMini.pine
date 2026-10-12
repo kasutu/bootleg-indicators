@@ -67,6 +67,7 @@ bigMult = input.float(1.3, "Big Candle (x avg consolidation candle)", minval=1, 
 useTriple = input.bool(true, "Allow Triple Close Breakout", group="News Reclaim")
 reclBuf = input.float(0.2, "SL Buffer beyond Box (x ATR)", minval=0, step=0.05, group="News Reclaim")
 showCons = input.bool(true, "Draw Consolidation Box", group="News Reclaim")
+showSkips = input.bool(true, "Show Skipped Wyckoff Breakouts", group="Display", tooltip="A grey x on range breakouts that did not become a trade; hover it to see which rule blocked it.")
 swingTp = input.bool(true, "ATR-based TP", group="Swing", tooltip="Final TP = entry +/- ATR x multiplier for both setups (replaces 3R for trend and the news other end for fades). Trend TP1 / TP2 sit at 1/3 and 2/3 of the way.")
 swingMult = input.float(3.0, "TP ATR Multiplier", minval=0.1, step=0.1, group="Swing")
 swingNews = input.bool(false, "Also Use ATR TP for News Setups", group="Swing", tooltip="Off: news fade / reclaim keep the research target (other end of the news candle) even when ATR-based TP is on.")
@@ -445,7 +446,7 @@ f_manage(Pos p) =>
 
 // check the dial-in filters and open position p; returns true when opened
 f_try(Pos p, int k, int d, float slPx, float tpPx, float volR, float tipExt, float sizeX) =>
-    bool ok = false
+    string why = ""
     fade = k == 1
     biasOn = biasMode == "All setups" or (biasMode == "Trend + Wyckoff" and (k == 0 or k == 3)) or k == 0
     biasOk = not biasOn or ((d == 1 ? close > slow : close < slow) and (d == 1 ? htfDiff >= 0 : htfDiff <= 0))
@@ -458,8 +459,9 @@ f_try(Pos p, int k, int d, float slPx, float tpPx, float volR, float tipExt, flo
     rngA = rngE / atr
     setupOk = k == 3 ? (fWyRiskMax == 0 or riskA <= fWyRiskMax) and (fWyRngMax == 0 or rngA <= fWyRngMax) : k == 2 ? true : fade ? (fFadeRiskMin == 0 or riskA >= fFadeRiskMin) and (fFadeRngMin == 0 or rngA >= fFadeRngMin) : (fTrendRngMax == 0 or rngA <= fTrendRngMax) and (fTrendRsiMin == 0 or rsiD >= fTrendRsiMin) and (fTrendPctBMin == -1 or pctBD >= fTrendPctBMin)
     passF = biasOk and setupOk and (fVolMin == 0 or volR >= fVolMin) and (fBodyMin == 0 or bodyE >= fBodyMin) and rsiD >= fRsiMin and rsiD <= fRsiMax and pctBD >= fPctBMin and pctBD <= fPctBMax and (fRiskMin == 0 or riskA >= fRiskMin) and (fRiskMax == 0 or riskA <= fRiskMax) and (fRngMin == 0 or rngA >= fRngMin) and (fRngMax == 0 or rngA <= fRngMax) and (fRRMin == 0 or rr >= fRRMin) and (not fade or fSizeMin == 0 or sizeX >= fSizeMin) and (not fade or fTipMax == 0 or tipExt <= fTipMax)
-    if passF and (d == 1 ? slPx < close and tpPx > close : slPx > close and tpPx < close)
-        ok := true
+    room = d == 1 ? slPx < close and tpPx > close : slPx > close and tpPx < close
+    why := not biasOk ? ((d == 1 ? close > slow : close < slow) ? "against the HTF bias" : "against the EMA200 bias") : not setupOk ? (k == 3 ? (fWyRiskMax > 0 and riskA > fWyRiskMax ? "risk " + str.tostring(riskA, "#.##") + " ATR > max " + str.tostring(fWyRiskMax) : "breakout candle " + str.tostring(rngA, "#.##") + " ATR > max " + str.tostring(fWyRngMax)) : "setup filter") : not passF ? "dial-in filter" : not room ? "no room between SL and TP" : ""
+    if why == ""
         p.cond.set(0, volR)
         p.cond.set(1, bodyE)
         p.cond.set(2, rsiD)
@@ -489,7 +491,7 @@ f_try(Pos p, int k, int d, float slPx, float tpPx, float volR, float tipExt, flo
             box.delete(boxes.shift())
             box.delete(boxes.shift())
             label.delete(tags.shift())
-    ok
+    why
 
 // manage both slots, then open new positions; each slot runs independently
 if barstate.isconfirmed
@@ -507,11 +509,16 @@ if pS.dir == 0 and (reclSig or fadeSig or trendBuy or trendSell) and not na(atr)
     volR = k == 2 ? rNVol : k == 1 ? nVolR : volume / volAvg
     tipExt = k == 2 ? math.abs(rTip - rNClose) / atr : k == 1 ? math.abs(nTip - nClose) / atr : na
     sizeX = k == 2 ? rNSize : k == 1 ? nSize : na
-    openedS := f_try(pS, k, d, slPx, tpPx, volR, tipExt, sizeX)
+    openedS := f_try(pS, k, d, slPx, tpPx, volR, tipExt, sizeX) == ""
 // WYCKOFF slot: range breakout
+if rangeSig and pW.dir != 0 and showSkips
+    label.new(bar_index, rangeDir == 1 ? low : high, "x", color=color(na), textcolor=color.gray, style=rangeDir == 1 ? label.style_label_up : label.style_label_down, size=size.small, tooltip="Wyckoff breakout skipped: a Wyckoff trade is already open")
 if pW.dir == 0 and rangeSig and not na(atr)
     tpW = swingTp and not na(swingAtr) ? close + rangeDir * swingAtr * swingMult : rangeTp
-    openedW := f_try(pW, 3, rangeDir, rangeSl, tpW, volume / volAvg, na, na)
+    whyW = f_try(pW, 3, rangeDir, rangeSl, tpW, volume / volAvg, na, na)
+    openedW := whyW == ""
+    if not openedW and showSkips
+        label.new(bar_index, rangeDir == 1 ? low : high, "x", color=color(na), textcolor=color.gray, style=rangeDir == 1 ? label.style_label_up : label.style_label_down, size=size.small, tooltip="Wyckoff " + (rangeDir == 1 ? "long" : "short") + " breakout skipped: " + whyW)
 
 alertcondition((openedS and pS.dir == 1) or (openedW and pW.dir == 1), "Buy", "Sniper Mini: BUY")
 alertcondition((openedS and pS.dir == -1) or (openedW and pW.dir == -1), "Sell", "Sniper Mini: SELL")
