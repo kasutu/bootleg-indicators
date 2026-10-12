@@ -6,7 +6,8 @@
 // 1. Exhaustion run: N consecutive bullish (top) / bearish (bottom) candles, ending with an indecision (doji) candle.
 //    Doji = body <= Doji Body % of the candle range.
 // 2. Liquidity sweep (replaces "candle outside Bollinger"): the run + doji takes out the highest high (top) /
-//    lowest low (bottom) of the previous Sweep Lookback candles.
+//    lowest low (bottom) of the previous Sweep Lookback candles, i.e. the second top runs slightly above the
+//    first before reversing (double top / double bottom with a stop run).
 // 3. Volume climax (optional, replaces RSI 70/30): the run + doji prints the highest raw volume of the previous
 //    Sweep Lookback candles.
 //
@@ -57,10 +58,13 @@ volOk = not useVol or (not na(priorVol) and runVol > priorVol)
 topSig = isDoji and upRun and (not useSweep or runHigh > priorHigh) and volOk
 btmSig = isDoji and dnRun and (not useSweep or runLow < priorLow) and volOk
 
+// Signal box over the run + doji and a triangle, as on the original indicator
 if topSig
-    label.new(bar_index, high, "TOP", color=color(na), textcolor=color.red, style=label.style_label_down, size=size.small, tooltip=str.tostring(runLen) + " bullish candles + doji" + (useSweep ? ", swept " + str.tostring(sweepLen) + "-bar high" : "") + (useVol ? ", volume climax" : ""))
+    box.new(bar_index - runLen, runHigh, bar_index, runLow, border_color=color.new(color.red, 40), bgcolor=color.new(color.red, 75))
+    label.new(bar_index, runHigh, "▼", color=color(na), textcolor=color.red, style=label.style_label_down, size=size.small, tooltip="TOP: " + str.tostring(runLen) + " bullish candles + doji" + (useSweep ? ", swept " + str.tostring(sweepLen) + "-bar high" : "") + (useVol ? ", volume climax" : ""))
 if btmSig
-    label.new(bar_index, low, "BTM", color=color(na), textcolor=color.green, style=label.style_label_up, size=size.small, tooltip=str.tostring(runLen) + " bearish candles + doji" + (useSweep ? ", swept " + str.tostring(sweepLen) + "-bar low" : "") + (useVol ? ", volume climax" : ""))
+    box.new(bar_index - runLen, runHigh, bar_index, runLow, border_color=color.new(color.blue, 40), bgcolor=color.new(color.blue, 75))
+    label.new(bar_index, runLow, "▲", color=color(na), textcolor=color.blue, style=label.style_label_up, size=size.small, tooltip="BOTTOM: " + str.tostring(runLen) + " bearish candles + doji" + (useSweep ? ", swept " + str.tostring(sweepLen) + "-bar low" : "") + (useVol ? ", volume climax" : ""))
 
 atr = ta.atr(atrLen)
 
