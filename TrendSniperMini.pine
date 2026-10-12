@@ -28,6 +28,10 @@ newsBody = input.float(50, "News Min Body %", minval=0, maxval=100, group="News 
 needBB = input.bool(true, "News Must Close Outside Bollinger", group="News Fade", tooltip="86-93% of news candles in the research closed outside the bands.")
 fadeWait = input.int(3, "Fade Window (candles)", minval=1, maxval=20, group="News Fade", tooltip="The first candle closing against the news candle must come within this many candles.")
 fadeBuf = input.float(0.2, "SL Buffer beyond Tip (x ATR)", minval=0, step=0.05, group="News Fade")
+swingTp = input.bool(false, "ATR-based TP", group="Swing", tooltip="Final TP = entry +/- ATR x multiplier for both setups (replaces 3R for trend and the news other end for fades). Trend TP1 / TP2 sit at 1/3 and 2/3 of the way.")
+swingMult = input.float(3.0, "TP ATR Multiplier", minval=0.1, step=0.1, group="Swing")
+swingLen = input.int(14, "Swing ATR Length", minval=1, group="Swing")
+swingTF = input.timeframe("", "Swing ATR Timeframe (empty = chart)", group="Swing", tooltip="Eg. 60 or 240 to size swing targets from a higher timeframe ATR (closed candles only).")
 keep = input.int(50, "Trades Shown", minval=1, maxval=150, group="Display")
 showStats = input.bool(true, "Show Entry Conditions Table", group="Display", tooltip="For every setup: range (min-max) and average of each entry condition among winners, and the average among losers. Use it to set the dial-in filters.")
 fVolMin = input.float(0, "Min Volume x Avg (0 = off)", minval=0, step=0.1, group="Dial-in Filters (both setups)")
@@ -51,6 +55,9 @@ cLoss = color.new(#283593, 70)
 
 // ===== Common =====
 atr = ta.atr(14)
+f_swingAtr() => ta.atr(swingLen)[1]
+swingAtrHtf = request.security(syminfo.tickerid, swingTF == "" ? timeframe.period : swingTF, f_swingAtr(), lookahead=barmerge.lookahead_on)
+swingAtr = swingTF == "" ? ta.atr(swingLen) : swingAtrHtf
 fast = ta.ema(close, fastLen)
 slow = ta.ema(close, slowLen)
 plot(fast, "Fast EMA", color.new(cLight, 20))
@@ -138,6 +145,7 @@ var float entry = na
 var float sl = na
 var float tp = na
 var float r = na
+var float step = na
 var int hits = 0
 var box win = na
 var box loss = na
@@ -160,7 +168,7 @@ if dir != 0 and barstate.isconfirmed and bar_index > box.get_left(win)
                 done := true
         else
             for i = hits + 1 to 3
-                if dir == 1 ? high >= entry + i * r : low <= entry - i * r
+                if dir == 1 ? high >= entry + i * step : low <= entry - i * step
                     hits := i
             done := hits == 3
     box.set_right(win, bar_index)
@@ -185,7 +193,7 @@ if dir == 0 and (fadeSig or trendBuy or trendSell) and not na(atr)
     d = fadeSig ? fadeDir : trendBuy ? 1 : -1
     fade = fadeSig
     slPx = fade ? nTip - d * atr * fadeBuf : close - d * atr * atrMult
-    tpPx = fade ? nOther : close + d * 3 * atr * atrMult
+    tpPx = swingTp and not na(swingAtr) ? close + d * swingAtr * swingMult : fade ? nOther : close + d * 3 * atr * atrMult
     rngE = high - low
     riskA = math.abs(close - slPx) / atr
     rr = math.abs(tpPx - close) / math.max(math.abs(close - slPx), syminfo.mintick)
@@ -210,10 +218,11 @@ if dir == 0 and (fadeSig or trendBuy or trendSell) and not na(atr)
         sl := slPx
         tp := tpPx
         r := math.abs(close - slPx)
+        step := swingTp ? math.abs(tpPx - close) / 3 : r
         hits := 0
         win := box.new(bar_index, math.max(close, tpPx), bar_index, math.min(close, tpPx), border_color=na, bgcolor=cWin)
         loss := box.new(bar_index, math.max(close, slPx), bar_index, math.min(close, slPx), border_color=na, bgcolor=cLoss)
-        tipTxt = (fade ? "News fade " : "Trend ") + (d == 1 ? "BUY" : "SELL") + "\nEntry " + str.tostring(close, format.mintick) + "\nSL " + str.tostring(slPx, format.mintick) + (fade ? "\nTP " + str.tostring(tpPx, format.mintick) + " (news other end)" : "\nTP1 " + str.tostring(close + d * r, format.mintick) + "\nTP2 " + str.tostring(close + d * 2 * r, format.mintick) + "\nTP3 " + str.tostring(tpPx, format.mintick))
+        tipTxt = (fade ? "News fade " : "Trend ") + (d == 1 ? "BUY" : "SELL") + "\nEntry " + str.tostring(close, format.mintick) + "\nSL " + str.tostring(slPx, format.mintick) + (fade ? "\nTP " + str.tostring(tpPx, format.mintick) + (swingTp ? " (" + str.tostring(swingMult) + " ATR)" : " (news other end)") : "\nTP1 " + str.tostring(close + d * step, format.mintick) + "\nTP2 " + str.tostring(close + d * 2 * step, format.mintick) + "\nTP3 " + str.tostring(tpPx, format.mintick) + (swingTp ? " (" + str.tostring(swingMult) + " ATR)" : ""))
         tag := label.new(bar_index, close, (fade ? "N" : "") + (d == 1 ? "B" : "S"), color=cMid, textcolor=color.white, style=label.style_label_right, size=size.tiny, tooltip=tipTxt)
         boxes.push(win)
         boxes.push(loss)
