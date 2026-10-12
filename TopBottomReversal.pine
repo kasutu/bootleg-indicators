@@ -1,0 +1,221 @@
+//@version=6
+// Top Bottom Reversal [kasutufx]
+// Price-action version of the "Top Bottom Reversal" idea: no Bollinger Bands, no RSI, no averages in the signal.
+//
+// Signal (all on closed candles, no repaint)
+// 1. Exhaustion run: N consecutive bullish (top) / bearish (bottom) candles, ending with an indecision (doji) candle.
+//    Doji = body <= Doji Body % of the candle range.
+// 2. Liquidity sweep (replaces "candle outside Bollinger"): the run + doji takes out the highest high (top) /
+//    lowest low (bottom) of the previous Sweep Lookback candles, i.e. the second top runs slightly above the
+//    first before reversing (double top / double bottom with a stop run).
+// 3. Volume climax (optional, replaces RSI 70/30): the run + doji prints the highest raw volume of the previous
+//    Sweep Lookback candles.
+//
+// Position
+// - Entry: on the doji close, or (default) on the next candle if it closes beyond the doji low (top) / high (bottom).
+// - SL: the run extreme (highest high for a top, lowest low for a bottom) plus an ATR buffer.
+// - TP: "Run origin" = open of the first candle of the run (the move fully retraced), or a fixed RR.
+// - SL to break-even at the chosen RR, one position at a time, optional max trades per day, lookback window.
+indicator("Top Bottom Reversal [kasutufx]", shorttitle="TB Reversal", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500, behind_chart=false)
+
+// ===== Inputs =====
+runLen = input.int(4, "Consecutive Candles", minval=2, maxval=10, group="Signal", tooltip="Bullish (top) / bearish (bottom) candles in a row before the doji.")
+dojiPct = input.float(25, "Doji Body % of Range", minval=1, maxval=60, group="Signal", tooltip="Indecision candle: body is at most this % of its high-low range.")
+useSweep = input.bool(true, "Require Liquidity Sweep", group="Signal", tooltip="Run + doji must take out the highest high (top) / lowest low (bottom) of the previous Sweep Lookback candles.")
+sweepLen = input.int(20, "Sweep Lookback", minval=2, group="Signal")
+useVol = input.bool(true, "Require Volume Climax", group="Signal", tooltip="Run + doji must print the highest raw volume of the previous Sweep Lookback candles. Turn off on symbols without volume.")
+active = input.bool(true, "Strategy Active (manual toggle)", group="Positions")
+entryMode = input.string("Confirmed", "Entry", options=["Doji close", "Confirmed"], group="Positions", tooltip="Confirmed = next candle must close below the doji low (top) / above the doji high (bottom); entry at that close.")
+tpMode = input.string("Run origin", "Take Profit", options=["Run origin", "RR"], group="Positions", tooltip="Run origin = open of the first candle of the run. RR = fixed multiple of the risk.")
+tpRR = input.float(2.0, "TP RR (RR mode)", minval=0.1, step=0.1, group="Positions")
+atrLen = input.int(14, "SL ATR Length", minval=1, group="Positions")
+atrMult = input.float(0.25, "SL Buffer (x ATR)", minval=0, step=0.05, group="Positions", tooltip="SL = run extreme plus this many ATRs. 0 = exactly at the extreme.")
+beRR = input.float(1.0, "Move SL to BE at RR (0 = off)", minval=0, step=0.1, group="Positions")
+lots = input.float(0.10, "Lot Size", minval=0.01, step=0.01, group="Positions")
+maxPerDay = input.int(0, "Max Trades Per Day (0 = no limit)", minval=0, group="Positions")
+lookbackWeeks = input.int(8, "Lookback (weeks)", minval=1, maxval=52, group="Positions")
+showTable = input.bool(true, "Show Info Panel", group="Positions")
+
+// ===== Signal =====
+bull = close > open
+bear = close < open
+rng = high - low
+isDoji = rng > 0 and math.abs(close - open) <= rng * dojiPct / 100
+
+// run of runLen candles right before the doji
+upRun = math.sum(bull ? 1 : 0, runLen)[1] == runLen
+dnRun = math.sum(bear ? 1 : 0, runLen)[1] == runLen
+// run + doji extremes and the levels before the run
+runHigh = ta.highest(high, runLen + 1)
+runLow = ta.lowest(low, runLen + 1)
+priorHigh = ta.highest(high, sweepLen)[runLen + 1]
+priorLow = ta.lowest(low, sweepLen)[runLen + 1]
+runVol = ta.highest(volume, runLen + 1)
+priorVol = ta.highest(volume, sweepLen)[runLen + 1]
+runOrigin = open[runLen]
+
+volOk = not useVol or (not na(priorVol) and runVol > priorVol)
+topSig = isDoji and upRun and (not useSweep or runHigh > priorHigh) and volOk
+btmSig = isDoji and dnRun and (not useSweep or runLow < priorLow) and volOk
+
+// Signal box over the run + doji and a triangle, as on the original indicator
+if topSig
+    box.new(bar_index - runLen, runHigh, bar_index, runLow, border_color=color.new(color.red, 40), bgcolor=color.new(color.red, 75))
+    label.new(bar_index, runHigh, "▼", color=color(na), textcolor=color.red, style=label.style_label_down, size=size.small, tooltip="TOP: " + str.tostring(runLen) + " bullish candles + doji" + (useSweep ? ", swept " + str.tostring(sweepLen) + "-bar high" : "") + (useVol ? ", volume climax" : ""))
+if btmSig
+    box.new(bar_index - runLen, runHigh, bar_index, runLow, border_color=color.new(color.blue, 40), bgcolor=color.new(color.blue, 75))
+    label.new(bar_index, runLow, "▲", color=color(na), textcolor=color.blue, style=label.style_label_up, size=size.small, tooltip="BOTTOM: " + str.tostring(runLen) + " bearish candles + doji" + (useSweep ? ", swept " + str.tostring(sweepLen) + "-bar low" : "") + (useVol ? ", volume climax" : ""))
+
+atr = ta.atr(atrLen)
+
+// ===== Positions =====
+var int dir = 0
+var int entryBar = na
+var float entry = na
+var float sl = na
+var float tp = na
+var float risk = na
+var bool be = false
+var int wins = 0
+var int losses = 0
+var int bes = 0
+var int day = na
+var int dayTrades = 0
+var box tpBox = na
+var box slBox = na
+var line beLn = na
+// pending setup waiting for the confirmation candle
+var int pDir = 0
+var float pSl = na
+var float pTp = na
+var float pTrig = na
+
+startT = timenow - lookbackWeeks * 7 * 86400000
+enabled = active and time_close >= startT and barstate.isconfirmed
+
+dayStart = time("D")
+if na(day) or dayStart != day
+    day := dayStart
+    dayTrades := 0
+
+bool evLong = false
+bool evShort = false
+bool evExit = false
+
+// Manage the open position (from the candle after entry; SL checked before TP)
+if dir != 0 and bar_index > entryBar and barstate.isconfirmed
+    float px = na
+    string res = ""
+    beLevel = entry + dir * risk * beRR
+    if dir == 1 ? low <= sl : high >= sl
+        px := sl
+        res := be ? "BE" : "LOSS"
+    else if dir == 1 ? high >= tp : low <= tp
+        px := tp
+        res := "WIN"
+    else if beRR > 0 and not be and (dir == 1 ? high >= beLevel : low <= beLevel)
+        be := true
+        sl := entry
+        beLn := line.new(bar_index, entry, bar_index, entry, color=color.orange, style=line.style_dashed)
+    box.set_right(tpBox, bar_index)
+    box.set_right(slBox, bar_index)
+    if not na(beLn)
+        line.set_x2(beLn, bar_index)
+    if res != ""
+        if res == "WIN"
+            wins += 1
+        else if res == "LOSS"
+            losses += 1
+        else
+            bes += 1
+        col = res == "WIN" ? color.green : res == "LOSS" ? color.red : color.orange
+        label.new(bar_index, px, res == "WIN" ? "W" : res == "LOSS" ? "L" : "BE", color=col, textcolor=color.white, style=label.style_label_left, size=size.tiny, tooltip=res + " @ " + str.tostring(px, format.mintick))
+        dir := 0
+        evExit := true
+
+dayFull = maxPerDay > 0 and dayTrades >= maxPerDay
+
+// Open a position at this candle's close
+f_canOpen(int d, float slPx, float tpPx) => d == 1 ? slPx < close and tpPx > close : slPx > close and tpPx < close
+
+int openDir = 0
+float openSl = na
+float openTp = na
+string openWhy = ""
+
+// Confirmation candle for a pending setup (one candle only)
+if pDir != 0 and barstate.isconfirmed
+    if enabled and dir == 0 and not dayFull and (pDir == 1 ? close > pTrig : close < pTrig)
+        openDir := pDir
+        openSl := pSl
+        openTp := pTp
+        openWhy := (pDir == 1 ? "bottom" : "top") + " confirmed"
+    pDir := 0
+
+// New signal
+if (topSig or btmSig) and topSig != btmSig and not na(atr)
+    d = btmSig ? 1 : -1
+    slPx = d == 1 ? runLow - atr * atrMult : runHigh + atr * atrMult
+    float tpPx = na
+    if tpMode == "Run origin"
+        tpPx := runOrigin
+    if entryMode == "Doji close"
+        if enabled and dir == 0 and openDir == 0 and not dayFull
+            openDir := d
+            openSl := slPx
+            openTp := tpPx
+            openWhy := d == 1 ? "bottom (doji close)" : "top (doji close)"
+    else
+        pDir := d
+        pSl := slPx
+        pTp := tpPx
+        pTrig := d == 1 ? high : low
+
+if openDir != 0
+    d = openDir
+    risk0 = math.abs(close - openSl)
+    tpPx = tpMode == "RR" ? close + d * risk0 * tpRR : openTp
+    if f_canOpen(d, openSl, tpPx)
+        dir := d
+        entryBar := bar_index
+        entry := close
+        sl := openSl
+        tp := tpPx
+        risk := risk0
+        be := false
+        beLn := na
+        dayTrades += 1
+        evLong := d == 1
+        evShort := d == -1
+        // Long / Short Position tool style: green profit zone, red loss zone
+        tpBox := box.new(bar_index, math.max(close, tpPx), bar_index + 1, math.min(close, tpPx), border_color=color.new(color.green, 60), bgcolor=color.new(color.green, 85))
+        slBox := box.new(bar_index, math.max(close, openSl), bar_index + 1, math.min(close, openSl), border_color=color.new(color.red, 60), bgcolor=color.new(color.red, 85))
+        tip = "Signal: " + openWhy + "\nEntry (" + timeframe.period + " close): " + str.tostring(close, format.mintick) + "\nSL: " + str.tostring(openSl, format.mintick) + " (run extreme)\nTP: " + str.tostring(tpPx, format.mintick) + (tpMode == "RR" ? " (" + str.tostring(tpRR) + "R)" : " (run origin)") + "\nRR: " + str.tostring(math.abs(tpPx - close) / risk0, "#.##") + "\nLots: " + str.tostring(lots)
+        label.new(bar_index, close, d == 1 ? "L" : "S", color=color.new(color.blue, 20), textcolor=color.white, style=label.style_label_right, size=size.tiny, tooltip=tip)
+
+alertcondition(topSig, "Top Signal", "Top Bottom Reversal: TOP")
+alertcondition(btmSig, "Bottom Signal", "Top Bottom Reversal: BOTTOM")
+alertcondition(evLong, "Long Entry", "Top Bottom Reversal: LONG entry")
+alertcondition(evShort, "Short Entry", "Top Bottom Reversal: SHORT entry")
+alertcondition(evExit, "Trade Exit", "Top Bottom Reversal: trade closed")
+
+// ===== Info panel =====
+var table tbl = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 20), border_width=1, border_color=color.gray)
+f_row(r, k, v, c) =>
+    table.cell(tbl, 0, r, k, text_color=color.white, text_size=size.small, text_halign=text.align_left)
+    table.cell(tbl, 1, r, v, text_color=c, text_size=size.small, text_halign=text.align_right)
+
+if showTable and barstate.islast
+    statusTxt = not active ? "OFF" : dir == 1 ? "IN LONG" : dir == -1 ? "IN SHORT" : pDir != 0 ? "WAIT CONFIRMATION" : dayFull ? "DAILY LIMIT REACHED" : "WAITING SIGNAL"
+    statusCol = dir != 0 ? color.aqua : pDir != 0 ? color.yellow : color.white
+    decided = wins + losses
+    winRate = decided > 0 ? wins * 100.0 / decided : 0.0
+    wlRatio = losses > 0 ? wins * 1.0 / losses : wins * 1.0
+    f_row(0, "Status [" + entryMode + " | TP " + tpMode + "]", statusTxt, statusCol)
+    f_row(1, "Wins", str.tostring(wins), color.green)
+    f_row(2, "Losses", str.tostring(losses), color.red)
+    f_row(3, "Break-even", str.tostring(bes), color.orange)
+    f_row(4, "Win Rate", str.tostring(winRate, "#.#") + "%", winRate >= 50 ? color.green : color.red)
+    f_row(5, "Win/Loss Ratio", str.tostring(wlRatio, "#.##"), wlRatio >= 1 ? color.green : color.red)
+    f_row(6, "Trades Today", str.tostring(dayTrades) + (maxPerDay > 0 ? " / " + str.tostring(maxPerDay) : ""), dayFull ? color.orange : color.white)
+    f_row(7, "Lookback", str.tostring(lookbackWeeks) + " weeks", color.white)
