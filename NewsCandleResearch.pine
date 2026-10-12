@@ -26,7 +26,8 @@ volLen = input.int(20, "Volume Average Length", minval=1, group="Research")
 rsiLen = input.int(14, "RSI Length", minval=2, group="Research")
 bbLen = input.int(20, "Bollinger Length", minval=2, group="Research")
 bbMult = input.float(2.0, "Bollinger StdDev", minval=0.1, step=0.1, group="Research")
-showMarks = input.bool(true, "Mark Chart-TF News / Return Candles", group="Display")
+showMarks = input.bool(true, "Mark News / Tip / Return Candles", group="Display")
+markSrc = input.string("15m", "Marks From", options=["15m", "5m", "Chart"], group="Display", tooltip="Timeframe whose news candles are marked. Drawn by time, so 15m marks show correctly on a 5m chart and vice versa. If several events fall inside one chart candle, only the last is drawn.")
 
 // ===== Study (runs on the timeframe it is requested on) =====
 // Returns running sums; averages are computed for the dashboard.
@@ -68,6 +69,24 @@ f_study() =>
     var float pEnd = na
     var int pBar = na
     var int legAgainst = 0
+    var float pTipPx = na
+    var int pTipT = na
+    var float pNewsC = na
+    var int pNewsT = na
+    // latest news candle and latest completed return, for the chart marks
+    var int curNT = na
+    var float curNY = na
+    var int curNDir = 0
+    var string newsTip = ""
+    var int lastNT = na
+    var float lastNC = na
+    var int lastTipT = na
+    var float lastTipPx = na
+    var int lastRetT = na
+    var float lastRetY = na
+    var bool lastRetAbove = false
+    var string retCode = ""
+    var string retTip = ""
     bool evRet = false
     int age = 0
     string pat = ""
@@ -76,6 +95,10 @@ f_study() =>
         age := bar_index - pBar
         against = pDir == 1 ? close < open : close > open
         legAgainst += against ? 1 : 0
+        // tip = furthest point past the news candle before the return
+        if pDir == 1 ? high > pTipPx : low < pTipPx
+            pTipPx := pDir == 1 ? high : low
+            pTipT := time
         if pDir == 1 ? low <= pEnd : high >= pEnd
             evRet := true
             rCnt += 1
@@ -99,6 +122,17 @@ f_study() =>
             rPin += pat == "Pin bar" ? 1 : 0
             rDoji += pat == "Doji" ? 1 : 0
             leg := legAgainst
+            lastNT := pNewsT
+            lastNC := pNewsC
+            lastTipT := pTipT
+            lastTipPx := pTipPx
+            lastRetT := time
+            lastRetAbove := close > open
+            lastRetY := lastRetAbove ? high : low
+            retCode := pat == "Engulfing" ? "ENG" : pat == "Marubozu" ? "MARU" : pat == "Pin bar" ? "PIN" : pat == "Doji" ? "DOJI" : "R"
+            upW = rng > 0 ? (high - bodyTop) / rng * 100 : 0
+            loW = rng > 0 ? (bodyBot - low) / rng * 100 : 0
+            retTip := "Return candle: " + pat + " (" + str.tostring(age) + " candles after news, " + str.tostring(legAgainst) + " against the news)\n" + (close > open ? "Bullish" : close < open ? "Bearish" : "Doji") + " | body " + str.tostring(bodyP, "#") + "%\nUpper wick " + str.tostring(upW, "#") + "% | lower wick " + str.tostring(loW, "#") + "%\nVolume " + str.tostring(volR, "#.#") + "x avg | RSI " + str.tostring(rsi, "#.#") + "\nTip " + str.tostring(pTipPx, format.mintick)
             pDir := 0
         else if age >= maxWait
             pDir := 0
@@ -114,35 +148,45 @@ f_study() =>
         pEnd := endMode == "Wick" ? (d == 1 ? low : high) : open
         pBar := bar_index
         legAgainst := 0
-    [nCnt, nVol, nRsi, nOut, rCnt, rBars, rCounter, rBody, rWickTo, rWickAway, rBeyond, rVol, rRsi, rPierce, rEng, rMaru, rPin, rDoji, evNews, evRet, age, pat, leg]
+        pTipPx := d == 1 ? high : low
+        pTipT := time
+        pNewsC := close
+        pNewsT := time
+        curNT := time
+        curNDir := d
+        curNY := d == 1 ? low : high
+        newsTip := "News candle (" + timeframe.period + ")\nVolume " + str.tostring(volR, "#.#") + "x avg\nRSI " + str.tostring(rsi, "#.#")
+    [nCnt, nVol, nRsi, nOut, rCnt, rBars, rCounter, rBody, rWickTo, rWickAway, rBeyond, rVol, rRsi, rPierce, rEng, rMaru, rPin, rDoji, curNT, curNY, curNDir, newsTip, lastNT, lastNC, lastTipT, lastTipPx, lastRetT, lastRetY, lastRetAbove, retCode, retTip]
 
-[a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, aN, aR, aAge, aPat, aLeg] = request.security(syminfo.tickerid, "5", f_study())
-[b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17, bN, bR, bAge, bPat, bLeg] = request.security(syminfo.tickerid, "15", f_study())
-[c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15, c16, c17, cN, cR, cAge, cPat, cLeg] = f_study()
+[a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, aNT, aNY, aND, aNTip, aLNT, aLNC, aTipT, aTipPx, aRT, aRY, aRA, aRC, aRTip] = request.security(syminfo.tickerid, "5", f_study())
+[b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17, bNT, bNY, bND, bNTip, bLNT, bLNC, bTipT, bTipPx, bRT, bRY, bRA, bRC, bRTip] = request.security(syminfo.tickerid, "15", f_study())
+[c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15, c16, c17, cNT, cNY, cND, cNTip, cLNT, cLNC, cTipT, cTipPx, cRT, cRY, cRA, cRC, cRTip] = f_study()
 
-// ===== Chart marks (chart timeframe) =====
-chartVolR = volume / ta.sma(volume, volLen)
-chartRsi = ta.rsi(close, rsiLen)
-// extremes of the move from the news candle to the return candle
-legLen = math.max(1, nz(cAge) + 1)
-legLo = ta.lowest(low, legLen)
-legHi = ta.highest(high, legLen)
-loOff = ta.lowestbars(low, legLen)
-hiOff = ta.highestbars(high, legLen)
-if showMarks and barstate.isconfirmed and cN
-    label.new(bar_index, close > open ? low : high, "N", color=color.new(color.yellow, 20), textcolor=color.black, style=close > open ? label.style_label_up : label.style_label_down, size=size.tiny, tooltip="News candle\nVolume " + str.tostring(chartVolR, "#.#") + "x avg\nRSI " + str.tostring(chartRsi, "#.#"))
-if showMarks and barstate.isconfirmed and cR
-    rng0 = high - low
-    bodyP = rng0 > 0 ? math.abs(close - open) / rng0 * 100 : 0
-    upW = rng0 > 0 ? (high - math.max(open, close)) / rng0 * 100 : 0
-    loW = rng0 > 0 ? (math.min(open, close) - low) / rng0 * 100 : 0
-    // mark the tip: the extension past the news candle close, from the news candle to the extreme candle
-    newsBull = close[cAge] > open[cAge]
-    tipPx = newsBull ? legHi : legLo
-    tipOff = newsBull ? hiOff : loOff
-    box.new(bar_index - cAge, newsBull ? tipPx : close[cAge], bar_index + tipOff, newsBull ? close[cAge] : tipPx, border_color=color.new(color.aqua, 30), bgcolor=color.new(color.aqua, 80))
-    code = cPat == "Engulfing" ? "ENG" : cPat == "Marubozu" ? "MARU" : cPat == "Pin bar" ? "PIN" : cPat == "Doji" ? "DOJI" : "R"
-    label.new(bar_index, close > open ? high : low, code, color=color.new(color.aqua, 20), textcolor=color.black, style=close > open ? label.style_label_down : label.style_label_up, size=size.tiny, tooltip="Return candle: " + cPat + " (" + str.tostring(cAge) + " candles after news, " + str.tostring(cLeg) + " against the news)\n" + (close > open ? "Bullish" : close < open ? "Bearish" : "Doji") + " | body " + str.tostring(bodyP, "#") + "%\nUpper wick " + str.tostring(upW, "#") + "% | lower wick " + str.tostring(loW, "#") + "%\nVolume " + str.tostring(chartVolR, "#.#") + "x avg | RSI " + str.tostring(chartRsi, "#.#"))
+// ===== Chart marks (from the selected timeframe, placed by time) =====
+use15 = markSrc == "15m"
+use5 = markSrc == "5m"
+mNewsCnt = use15 ? b0 : use5 ? a0 : c0
+mRetCnt = use15 ? b4 : use5 ? a4 : c4
+mNT = use15 ? bNT : use5 ? aNT : cNT
+mNY = use15 ? bNY : use5 ? aNY : cNY
+mND = use15 ? bND : use5 ? aND : cND
+mNTip = use15 ? bNTip : use5 ? aNTip : cNTip
+mLNT = use15 ? bLNT : use5 ? aLNT : cLNT
+mLNC = use15 ? bLNC : use5 ? aLNC : cLNC
+mTipT = use15 ? bTipT : use5 ? aTipT : cTipT
+mTipPx = use15 ? bTipPx : use5 ? aTipPx : cTipPx
+mRT = use15 ? bRT : use5 ? aRT : cRT
+mRY = use15 ? bRY : use5 ? aRY : cRY
+mRA = use15 ? bRA : use5 ? aRA : cRA
+mRC = use15 ? bRC : use5 ? aRC : cRC
+mRTip = use15 ? bRTip : use5 ? aRTip : cRTip
+
+if showMarks and mNewsCnt > nz(mNewsCnt[1]) and not na(mNT)
+    label.new(mNT, mNY, "N", xloc=xloc.bar_time, color=color.new(color.yellow, 20), textcolor=color.black, style=mND == 1 ? label.style_label_up : label.style_label_down, size=size.tiny, tooltip=mNTip)
+if showMarks and mRetCnt > nz(mRetCnt[1]) and not na(mRT)
+    // tip: from the news candle close to the furthest point past it, news candle -> extreme candle
+    box.new(mLNT, math.max(mLNC, mTipPx), mTipT, math.min(mLNC, mTipPx), xloc=xloc.bar_time, border_color=color.new(color.aqua, 30), bgcolor=color.new(color.aqua, 80))
+    label.new(mRT, mRY, mRC, xloc=xloc.bar_time, color=color.new(color.aqua, 20), textcolor=color.black, style=mRA ? label.style_label_down : label.style_label_up, size=size.tiny, tooltip=mRTip)
 
 // ===== Dashboard =====
 f_pct(float part, float whole) => whole > 0 ? str.tostring(part / whole * 100, "#") + "%" : "-"
