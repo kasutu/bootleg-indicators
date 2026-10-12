@@ -32,7 +32,7 @@ indicator("Trend Sniper Mini [kasutufx]", shorttitle="Sniper Mini", overlay=true
 
 // ===== Inputs =====
 useTrend = input.bool(true, "Trend Entries", group="Trend")
-biasMode = input.string("All setups", "EMA200 Direction Bias", options=["All setups", "Trend + Wyckoff", "Trend only"], group="Trend", tooltip="Longs only when price is above the slow EMA (200), shorts only below it. Choose which setups follow the bias; news fades / reclaims trade against the news candle and may fire counter-bias.")
+biasMode = input.string("Trend only", "EMA200 Direction Bias", options=["All setups", "Trend + Wyckoff", "Trend only"], group="Trend", tooltip="Longs only when price is above the slow EMA (200), shorts only below it. Choose which setups follow the bias; news fades / reclaims trade against the news candle and may fire counter-bias.")
 matsLen = input.int(30, "MATS Length", minval=2, group="MATS (ChartPrime, visual only)")
 showMats = input.bool(true, "Show MATS Line", group="MATS (ChartPrime, visual only)")
 useRange = input.bool(true, "Range Breakout Entries", group="Wyckoff Range Breakout")
@@ -95,8 +95,8 @@ fFadeRngMin = input.float(0, "Min Entry Range in ATR (0 = off)", minval=0, step=
 fTrendRngMax = input.float(1.6, "Max Entry Range in ATR (0 = off)", minval=0, step=0.1, group="Dial-in Filters (trend)", tooltip="15m results: winners avg 1.48 ATR, losers 1.75 ATR (stretched entry candles failed more).")
 fTrendRsiMin = input.float(0, "Min RSI, trade direction (0 = off)", minval=0, maxval=100, group="Dial-in Filters (trend)", tooltip="Off by default: in the run after it was enabled, winners and losers had the same RSI (55 vs 54) and trend Net R fell from 8.4R to 2.8R. Longs use RSI, shorts 100 - RSI.")
 fTrendPctBMin = input.float(-1, "Min BB %B, trade direction (-1 = off)", minval=-1, step=0.05, group="Dial-in Filters (trend)", tooltip="Off by default: no edge in the latest run (0.80 vs 0.78). Longs use %B, shorts 1 - %B.")
-fWyRiskMax = input.float(2.5, "Max Risk in ATR (0 = off)", minval=0, step=0.1, group="Dial-in Filters (wyckoff)", tooltip="15m results: winners avg 2.27 ATR, losers 2.74 ATR (too-wide ranges failed).")
-fWyRngMax = input.float(2.0, "Max Breakout Candle Range in ATR (0 = off)", minval=0, step=0.1, group="Dial-in Filters (wyckoff)", tooltip="15m results: winners avg 1.77 ATR, losers 2.03 ATR (climax breakout candles failed).")
+fWyRiskMax = input.float(0, "Max Risk in ATR (0 = off)", minval=0, step=0.1, group="Dial-in Filters (wyckoff)", tooltip="Off by default so explosive breakouts trade. 15m results: winners avg 2.27 ATR, losers 2.74 ATR; try 2.5 to filter wide ranges.")
+fWyRngMax = input.float(0, "Max Breakout Candle Range in ATR (0 = off)", minval=0, step=0.1, group="Dial-in Filters (wyckoff)", tooltip="Off by default so explosive breakouts trade. 15m results: winners avg 1.77 ATR, losers 2.03 ATR; try 2.0 to filter climax candles.")
 
 // ===== Blue palette =====
 cLight = #64B5F6
