@@ -321,6 +321,27 @@ class Main(MainContext):
             self._tag.set(LabelAbs('', AbsolutePosition(left_time, top), font_size=self._font,
                                    text_color=fade(self._range, 10), bg_color=color.TRANSPARENT,
                                    callout_position=callout_position.TOP_RIGHT))
+        # Put every new object on the chart right away, so erasing a range that fails on the bar it formed
+        # never touches an object that was not drawn
+        for i in range(self._steps):
+            shade_opt = self._shades[i].get()
+            if shade_opt is not None:
+                self.chart.draw(shade_opt.value())
+        box_opt = self._box.get()
+        if box_opt is not None:
+            self.chart.draw(box_opt.value())
+        eq_opt = self._equilibrium.get()
+        if eq_opt is not None:
+            self.chart.draw(eq_opt.value())
+        lq_opt = self._lower_quartile.get()
+        if lq_opt is not None:
+            self.chart.draw(lq_opt.value())
+        uq_opt = self._upper_quartile.get()
+        if uq_opt is not None:
+            self.chart.draw(uq_opt.value())
+        tag_opt = self._tag.get()
+        if tag_opt is not None:
+            self.chart.draw(tag_opt.value())
 
     def _render(self, left_time: float, right_time: float, top: float, bottom: float,
                 border: Color, border_style: line_style, fill: Color, tag_text: str, tag_color: Color) -> None:
