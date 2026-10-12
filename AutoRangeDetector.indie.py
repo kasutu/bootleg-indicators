@@ -1,4 +1,7 @@
 # indie:lang_version = 5
+# This work is licensed under Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
+# https://creativecommons.org/licenses/by-nc-sa/4.0/
+# Original "Auto Range Detector" (Pine v6) (c) QuantAlgo. Indie port shared under the same license.
 # Auto Range Detector [QuantAlgo] - port of AutoRangeDetector (Pine v6) to Indie for Exness Terminal / TakeProfit.
 #
 # Differences from the Pine original, forced by the Indie runtime:
