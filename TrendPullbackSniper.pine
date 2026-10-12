@@ -12,8 +12,10 @@
 //    Result = highest target reached before the exit (SL = no target reached).
 // 5. Grade: A = strong volume and EMA spread > 1 ATR, B = strong volume, C = otherwise.
 //
+// Display: the open trade projects its boxes ahead with ENTRY (grade) / SL / TP1-TP3 labels on the right,
+// targets light up when hit. Closed trades stay on the chart, trimmed to the exit, tagged with the result.
 // Performance: one higher-timeframe request, drawings created only when a trade opens or closes,
-// the open trade only moves 2 box edges per bar, and old trades beyond "Trades Shown" are deleted.
+// only the open trade is touched per bar, and old trades beyond "Trades Shown" are deleted.
 indicator("Trend Pullback Sniper [kasutufx]", shorttitle="TP Sniper", overlay=true, max_boxes_count=500, max_labels_count=500, max_lines_count=500)
 
 // ===== Inputs =====
@@ -27,6 +29,7 @@ volMult = input.float(1.2, "Volume Strength Multiplier", minval=0, step=0.1, gro
 atrLen = input.int(14, "ATR Length", minval=1, group="Risk")
 atrMult = input.float(1.5, "SL ATR Multiplier", minval=0.1, step=0.1, group="Risk")
 beAfterTp1 = input.bool(false, "Move SL to Entry After TP1", group="Risk")
+projBars = input.int(30, "Open Trade Projection (bars)", minval=1, maxval=200, group="Display", tooltip="While a trade is open its boxes extend this many bars ahead, with ENTRY / SL / TP1-TP3 price labels at the right edge. Closed trades are trimmed to their exit candle.")
 maxShown = input.int(50, "Trades Shown", minval=1, maxval=150, group="Display", tooltip="Past trades kept on the chart. Older ones are deleted to keep the chart fast.")
 showDash = input.bool(true, "Show Dashboard", group="Display")
 colFast = input.color(color.rgb(46, 160, 67), "Fast EMA", inline="ema", group="Display")
@@ -69,6 +72,16 @@ var Trade cur = na
 var int total = 0
 var int winners = 0
 var int tp3s = 0
+// price labels of the open trade only: ENTRY, SL, TP1, TP2, TP3
+var array<label> live = array.new<label>()
+
+f_clearLive() =>
+    for lb in live
+        label.delete(lb)
+    array.clear(live)
+
+f_liveLabel(float y, string txt, color col) =>
+    array.push(live, label.new(bar_index + projBars, y, txt, style=label.style_label_left, color=col, textcolor=color.white, size=size.small))
 
 f_drop(Trade t) =>
     box.delete(t.win)
@@ -94,12 +107,23 @@ if not na(cur) and barstate.isconfirmed and bar_index > box.get_left(cur.win)
             cur.hits := 1
             if beAfterTp1
                 cur.sl := cur.entry
+                label.set_y(live.get(1), cur.sl)
+                label.set_text(live.get(1), "SL (BE)\n" + str.tostring(cur.sl, format.mintick))
         if cur.hits < 2 and (d == 1 ? high >= cur.tp2 : low <= cur.tp2)
             cur.hits := 2
         if d == 1 ? high >= cur.tp3 : low <= cur.tp3
             cur.hits := 3
             done := true
-    f_stretch(cur, bar_index)
+        // light up the targets reached
+        for i = 1 to 3
+            if cur.hits >= i
+                label.set_color(live.get(i + 1), color.lime)
+    // open trade keeps projecting ahead; the price labels ride the right edge
+    xr = math.max(box.get_left(cur.win) + projBars, bar_index)
+    f_stretch(cur, done ? bar_index : xr)
+    if not done
+        for lb in live
+            label.set_x(lb, xr)
     if done
         res = cur.hits == 0 ? "SL" : "TP" + str.tostring(cur.hits)
         col = cur.hits == 0 ? color.red : cur.hits == 3 ? color.lime : color.green
@@ -109,6 +133,7 @@ if not na(cur) and barstate.isconfirmed and bar_index > box.get_left(cur.win)
         winners += cur.hits > 0 ? 1 : 0
         tp3s += cur.hits == 3 ? 1 : 0
         cur := na
+        f_clearLive()
 
 // Open a new trade
 bool evBuy = false
@@ -117,10 +142,17 @@ if na(cur) and (longSig or shortSig) and not na(atrVal)
     d = longSig ? 1 : -1
     r = atrVal * atrMult
     t = Trade.new(d, close, close - d * r, close + d * r, close + d * 2 * r, close + d * 3 * r)
-    t.win := box.new(bar_index, math.max(close, t.tp3), bar_index + 1, math.min(close, t.tp3), border_color=color.new(color.green, 70), bgcolor=color.new(color.green, 85))
-    t.loss := box.new(bar_index, math.max(close, t.sl), bar_index + 1, math.min(close, t.sl), border_color=color.new(color.red, 70), bgcolor=color.new(color.red, 85))
-    t.l1 := line.new(bar_index, t.tp1, bar_index + 1, t.tp1, color=color.new(color.green, 50), style=line.style_dotted)
-    t.l2 := line.new(bar_index, t.tp2, bar_index + 1, t.tp2, color=color.new(color.green, 50), style=line.style_dotted)
+    xr = bar_index + projBars
+    t.win := box.new(bar_index, math.max(close, t.tp3), xr, math.min(close, t.tp3), border_color=color.new(color.green, 70), bgcolor=color.new(color.green, 85))
+    t.loss := box.new(bar_index, math.max(close, t.sl), xr, math.min(close, t.sl), border_color=color.new(color.red, 70), bgcolor=color.new(color.red, 85))
+    t.l1 := line.new(bar_index, t.tp1, xr, t.tp1, color=color.new(color.green, 50), style=line.style_dotted)
+    t.l2 := line.new(bar_index, t.tp2, xr, t.tp2, color=color.new(color.green, 50), style=line.style_dotted)
+    f_clearLive()
+    f_liveLabel(close, "ENTRY (" + grade + ")\n" + str.tostring(close, format.mintick), color.gray)
+    f_liveLabel(t.sl, "SL\n" + str.tostring(t.sl, format.mintick), color.red)
+    f_liveLabel(t.tp1, "TP1", color.green)
+    f_liveLabel(t.tp2, "TP2", color.green)
+    f_liveLabel(t.tp3, "TP3", color.green)
     tip = (d == 1 ? "BUY" : "SELL") + " (" + grade + ")\nEntry: " + str.tostring(close, format.mintick) + "\nSL: " + str.tostring(t.sl, format.mintick) + "\nTP1: " + str.tostring(t.tp1, format.mintick) + "\nTP2: " + str.tostring(t.tp2, format.mintick) + "\nTP3: " + str.tostring(t.tp3, format.mintick)
     t.tag := label.new(bar_index, d == 1 ? low : high, (d == 1 ? "B " : "S ") + grade, color=color.new(color.gray, 20), textcolor=color.white, style=d == 1 ? label.style_label_up : label.style_label_down, size=size.tiny, tooltip=tip)
     cur := t
