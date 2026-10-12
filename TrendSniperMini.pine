@@ -7,7 +7,8 @@
 // Two independent engines: SNIPER (trend / news fade / news reclaim, one trade at a time) and WYCKOFF
 // (range breakout, its own trade slot), so both can be in a position at once. every past execution kept on the chart. Blue palette (red-green safe).
 //
-// TREND     : fast EMA above / below slow EMA (+ HTF agrees), price closes back across the fast EMA,
+// BIAS      : direction bias = price vs the slow EMA (200): longs only above it, shorts only below it.
+// TREND     : price on the bias side of EMA 200 (+ HTF agrees), price closes back across the fast EMA,
 //             volume above average. SL = ATR x mult, targets 1R / 2R / 3R. Win = TP1 or better.
 // NEWS FADE : from the News Candle Research findings (news candles close outside the Bollinger Bands on high
 //             volume, about half to 70% get fully reclaimed, the reclaim is always led by candles closing against
@@ -31,6 +32,7 @@ indicator("Trend Sniper Mini [kasutufx]", shorttitle="Sniper Mini", overlay=true
 
 // ===== Inputs =====
 useTrend = input.bool(true, "Trend Entries", group="Trend")
+biasMode = input.string("All setups", "EMA200 Direction Bias", options=["All setups", "Trend + Wyckoff", "Trend only"], group="Trend", tooltip="Longs only when price is above the slow EMA (200), shorts only below it. Choose which setups follow the bias; news fades / reclaims trade against the news candle and may fire counter-bias.")
 matsLen = input.int(30, "MATS Length", minval=2, group="MATS (ChartPrime, visual only)")
 showMats = input.bool(true, "Show MATS Line", group="MATS (ChartPrime, visual only)")
 useRange = input.bool(true, "Range Breakout Entries", group="Wyckoff Range Breakout")
@@ -222,8 +224,8 @@ htfRaw = request.security(syminfo.tickerid, htfTF == "" ? timeframe.period : htf
 htfDiff = htfTF == "" ? 0.0 : htfRaw
 volAvg = ta.sma(volume, 20)
 volOk = volMult == 0 or volume > volAvg * volMult
-emaBuy = fast > slow and ta.crossover(close, fast)
-emaSell = fast < slow and ta.crossunder(close, fast)
+emaBuy = close > slow and ta.crossover(close, fast)
+emaSell = close < slow and ta.crossunder(close, fast)
 trendBuy = useTrend and barstate.isconfirmed and emaBuy and htfDiff >= 0 and volOk
 trendSell = useTrend and barstate.isconfirmed and emaSell and htfDiff <= 0 and volOk
 
@@ -444,6 +446,8 @@ f_manage(Pos p) =>
 f_try(Pos p, int k, int d, float slPx, float tpPx, float volR, float tipExt, float sizeX) =>
     bool ok = false
     fade = k == 1
+    biasOn = biasMode == "All setups" or (biasMode == "Trend + Wyckoff" and (k == 0 or k == 3)) or k == 0
+    biasOk = not biasOn or (d == 1 ? close > slow : close < slow)
     rngE = high - low
     riskA = math.abs(close - slPx) / atr
     rr = math.abs(tpPx - close) / math.max(math.abs(close - slPx), syminfo.mintick)
@@ -452,7 +456,7 @@ f_try(Pos p, int k, int d, float slPx, float tpPx, float volR, float tipExt, flo
     pctBD = d == 1 ? pctB : 1 - pctB
     rngA = rngE / atr
     setupOk = k == 3 ? (fWyRiskMax == 0 or riskA <= fWyRiskMax) and (fWyRngMax == 0 or rngA <= fWyRngMax) : k == 2 ? true : fade ? (fFadeRiskMin == 0 or riskA >= fFadeRiskMin) and (fFadeRngMin == 0 or rngA >= fFadeRngMin) : (fTrendRngMax == 0 or rngA <= fTrendRngMax) and (fTrendRsiMin == 0 or rsiD >= fTrendRsiMin) and (fTrendPctBMin == -1 or pctBD >= fTrendPctBMin)
-    passF = setupOk and (fVolMin == 0 or volR >= fVolMin) and (fBodyMin == 0 or bodyE >= fBodyMin) and rsiD >= fRsiMin and rsiD <= fRsiMax and pctBD >= fPctBMin and pctBD <= fPctBMax and (fRiskMin == 0 or riskA >= fRiskMin) and (fRiskMax == 0 or riskA <= fRiskMax) and (fRngMin == 0 or rngA >= fRngMin) and (fRngMax == 0 or rngA <= fRngMax) and (fRRMin == 0 or rr >= fRRMin) and (not fade or fSizeMin == 0 or sizeX >= fSizeMin) and (not fade or fTipMax == 0 or tipExt <= fTipMax)
+    passF = biasOk and setupOk and (fVolMin == 0 or volR >= fVolMin) and (fBodyMin == 0 or bodyE >= fBodyMin) and rsiD >= fRsiMin and rsiD <= fRsiMax and pctBD >= fPctBMin and pctBD <= fPctBMax and (fRiskMin == 0 or riskA >= fRiskMin) and (fRiskMax == 0 or riskA <= fRiskMax) and (fRngMin == 0 or rngA >= fRngMin) and (fRngMax == 0 or rngA <= fRngMax) and (fRRMin == 0 or rr >= fRRMin) and (not fade or fSizeMin == 0 or sizeX >= fSizeMin) and (not fade or fTipMax == 0 or tipExt <= fTipMax)
     if passF and (d == 1 ? slPx < close and tpPx > close : slPx > close and tpPx < close)
         ok := true
         p.cond.set(0, volR)
@@ -535,7 +539,7 @@ if barstate.islast
     f_row(3, "Sniper: News reclaim", stTrades.get(2), stWins.get(2), stR.get(2))
     f_row(4, "Wyckoff: Range breakout", stTrades.get(3), stWins.get(3), stR.get(3))
     f_row(5, "All", stTrades.get(0) + stTrades.get(1) + stTrades.get(2) + stTrades.get(3), stWins.get(0) + stWins.get(1) + stWins.get(2) + stWins.get(3), stR.get(0) + stR.get(1) + stR.get(2) + stR.get(3))
-    table.cell(dash, 0, 6, "Sniper " + f_state(pS) + " | Wyckoff " + f_state(pW) + " | trend " + (fast > slow ? "up" : "down"), text_color=cPale, text_size=size.small, text_halign=text.align_left)
+    table.cell(dash, 0, 6, "Sniper " + f_state(pS) + " | Wyckoff " + f_state(pW) + " | bias " + (close > slow ? "long (above EMA200)" : "short (below EMA200)"), text_color=cPale, text_size=size.small, text_halign=text.align_left)
     table.merge_cells(dash, 0, 6, 5, 6)
     table.cell(dash, 0, 7, "R: loss = -1R. Trend scales out 1/3 at each TP, rest at SL.", text_color=cPale, text_size=size.tiny, text_halign=text.align_left)
     table.merge_cells(dash, 0, 7, 5, 7)
