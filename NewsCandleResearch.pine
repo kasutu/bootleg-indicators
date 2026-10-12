@@ -125,8 +125,10 @@ chartVolR = volume / ta.sma(volume, volLen)
 chartRsi = ta.rsi(close, rsiLen)
 // extremes of the move from the news candle to the return candle
 legLen = math.max(1, nz(cAge) + 1)
-legHi = ta.highest(high, legLen)
 legLo = ta.lowest(low, legLen)
+legHi = ta.highest(high, legLen)
+loOff = ta.lowestbars(low, legLen)
+hiOff = ta.highestbars(high, legLen)
 if showMarks and barstate.isconfirmed and cN
     label.new(bar_index, close > open ? low : high, "N", color=color.new(color.yellow, 20), textcolor=color.black, style=close > open ? label.style_label_up : label.style_label_down, size=size.tiny, tooltip="News candle\nVolume " + str.tostring(chartVolR, "#.#") + "x avg\nRSI " + str.tostring(chartRsi, "#.#"))
 if showMarks and barstate.isconfirmed and cR
@@ -134,8 +136,11 @@ if showMarks and barstate.isconfirmed and cR
     bodyP = rng0 > 0 ? math.abs(close - open) / rng0 * 100 : 0
     upW = rng0 > 0 ? (high - math.max(open, close)) / rng0 * 100 : 0
     loW = rng0 > 0 ? (math.min(open, close) - low) / rng0 * 100 : 0
-    // box over the reversal side: news candle -> return candle
-    box.new(bar_index - cAge, legHi, bar_index, legLo, border_color=color.new(color.aqua, 40), bgcolor=color.new(color.aqua, 88))
+    // mark the tip: the extension past the news candle close, from the news candle to the extreme candle
+    newsBull = close[cAge] > open[cAge]
+    tipPx = newsBull ? legHi : legLo
+    tipOff = newsBull ? hiOff : loOff
+    box.new(bar_index - cAge, newsBull ? tipPx : close[cAge], bar_index + tipOff, newsBull ? close[cAge] : tipPx, border_color=color.new(color.aqua, 30), bgcolor=color.new(color.aqua, 80))
     code = cPat == "Engulfing" ? "ENG" : cPat == "Marubozu" ? "MARU" : cPat == "Pin bar" ? "PIN" : cPat == "Doji" ? "DOJI" : "R"
     label.new(bar_index, close > open ? high : low, code, color=color.new(color.aqua, 20), textcolor=color.black, style=close > open ? label.style_label_down : label.style_label_up, size=size.tiny, tooltip="Return candle: " + cPat + " (" + str.tostring(cAge) + " candles after news, " + str.tostring(cLeg) + " against the news)\n" + (close > open ? "Bullish" : close < open ? "Bearish" : "Doji") + " | body " + str.tostring(bodyP, "#") + "%\nUpper wick " + str.tostring(upW, "#") + "% | lower wick " + str.tostring(loW, "#") + "%\nVolume " + str.tostring(chartVolR, "#.#") + "x avg | RSI " + str.tostring(chartRsi, "#.#"))
 
