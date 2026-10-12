@@ -1,6 +1,6 @@
 //@version=6
 // Trend Sniper Mini [kasutufx]
-// Two setups, one trade at a time, every past execution kept on the chart. Blue palette (red-green safe).
+// Three setups, one trade at a time, every past execution kept on the chart. Blue palette (red-green safe).
 //
 // TREND     : fast EMA above / below slow EMA (+ HTF agrees), price closes back across the fast EMA,
 //             volume above average. SL = ATR x mult, targets 1R / 2R / 3R. Win = TP1 or better.
@@ -9,6 +9,11 @@
 //             the news, and the tip usually forms within the first candles).
 //             Entry = first candle closing against a news candle within Fade Window candles.
 //             SL = beyond the tip (extreme since the news candle) + ATR buffer. TP = other end of the news candle.
+// NEWS RECLAIM: after a news candle, price makes its tip and consolidates there (>= Min Candles inside a
+//             box no taller than Max Box x ATR). Entry when a candle closes out of the box toward the news candle
+//             (reclaim direction) as a triple close (3 closes in that direction) or a candle bigger than the
+//             average consolidation candle x Big Candle. SL beyond the box (tip side) + buffer. TP = other end
+//             of the news candle. A new tip restarts the consolidation.
 // RESEARCH  : every entry records its conditions (volume, body, RSI, BB %B, risk, RR, range, news size, tip
 //             extension). The bottom table shows the winners' range and average vs the losers' average per setup;
 //             the Dial-in Filters restrict entries to the range you choose.
@@ -28,6 +33,14 @@ newsBody = input.float(50, "News Min Body %", minval=0, maxval=100, group="News 
 needBB = input.bool(true, "News Must Close Outside Bollinger", group="News Fade", tooltip="86-93% of news candles in the research closed outside the bands.")
 fadeWait = input.int(3, "Fade Window (candles)", minval=1, maxval=20, group="News Fade", tooltip="The first candle closing against the news candle must come within this many candles.")
 fadeBuf = input.float(0.2, "SL Buffer beyond Tip (x ATR)", minval=0, step=0.05, group="News Fade")
+useRecl = input.bool(true, "News Reclaim Entries", group="News Reclaim")
+reclWindow = input.int(40, "Look for Reclaim Within (candles)", minval=5, maxval=200, group="News Reclaim", tooltip="Research: reclaims took about 14 candles on average.")
+consMin = input.int(4, "Consolidation Min Candles", minval=2, maxval=50, group="News Reclaim")
+consMaxAtr = input.float(2.0, "Consolidation Max Box (x ATR)", minval=0.2, step=0.1, group="News Reclaim")
+bigMult = input.float(1.5, "Big Candle (x avg consolidation candle)", minval=1, step=0.1, group="News Reclaim")
+useTriple = input.bool(true, "Allow Triple Close Breakout", group="News Reclaim")
+reclBuf = input.float(0.2, "SL Buffer beyond Box (x ATR)", minval=0, step=0.05, group="News Reclaim")
+showCons = input.bool(true, "Draw Consolidation Box", group="News Reclaim")
 swingTp = input.bool(true, "ATR-based TP", group="Swing", tooltip="Final TP = entry +/- ATR x multiplier for both setups (replaces 3R for trend and the news other end for fades). Trend TP1 / TP2 sit at 1/3 and 2/3 of the way.")
 swingMult = input.float(3.0, "TP ATR Multiplier", minval=0.1, step=0.1, group="Swing")
 swingLen = input.int(14, "Swing ATR Length", minval=1, group="Swing")
@@ -106,6 +119,65 @@ if nDir != 0 and barstate.isconfirmed and bar_index > nBar
         nDir := 0
     else if bar_index - nBar >= fadeWait
         nDir := 0
+// ===== News reclaim signal (tip consolidation -> breakout toward the news candle) =====
+var int rDir = 0
+var int rBar = na
+var float rOther = na
+var float rTip = na
+var float rNClose = na
+var float rNVol = na
+var float rNSize = na
+var float cHi = na
+var float cLo = na
+var float cSum = 0.0
+var int cN = 0
+var int cStart = na
+bool reclSig = false
+int reclDir = 0
+float reclSl = na
+if rDir != 0 and barstate.isconfirmed and bar_index > rBar
+    newTip = rDir == 1 ? high > rTip : low < rTip
+    if newTip
+        // a new extreme restarts the consolidation from this candle
+        rTip := rDir == 1 ? high : low
+        cHi := high
+        cLo := low
+        cSum := rng
+        cN := 1
+        cStart := bar_index
+    else
+        boxOk = cN >= consMin and cHi - cLo <= consMaxAtr * atr
+        breakout = rDir == 1 ? close < cLo : close > cHi
+        triple = rDir == 1 ? close < open and close[1] < open[1] and close[2] < open[2] : close > open and close[1] > open[1] and close[2] > open[2]
+        big = cN > 0 and rng > cSum / cN * bigMult
+        if boxOk and breakout and ((useTriple and triple) or big)
+            reclSig := true
+            reclDir := -rDir
+            reclSl := rDir == 1 ? cHi + atr * reclBuf : cLo - atr * reclBuf
+            if showCons
+                box.new(cStart, cHi, bar_index - 1, cLo, border_color=color.new(cLight, 30), bgcolor=color.new(cLight, 90))
+            rDir := 0
+        else
+            cHi := math.max(cHi, high)
+            cLo := math.min(cLo, low)
+            cSum += rng
+            cN += 1
+    if rDir != 0 and bar_index - rBar >= reclWindow
+        rDir := 0
+if isNews and useRecl
+    rDir := close > open ? 1 : -1
+    rBar := bar_index
+    rOther := rDir == 1 ? low : high
+    rTip := rDir == 1 ? high : low
+    rNClose := close
+    rNVol := volume / volAvg
+    rNSize := rng / priorMaxRng
+    // the news candle itself is the first candle of the tip area
+    cHi := high
+    cLo := low
+    cSum := rng
+    cN := 1
+    cStart := bar_index
 if isNews
     nDir := close > open ? 1 : -1
     nBar := bar_index
@@ -134,6 +206,7 @@ type Agg
 f_newAgg() => Agg.new(array.new<float>(NF, 0.0), array.new<float>(NF, na), array.new<float>(NF, na), array.new<float>(NF, 0.0), array.new<int>(NF, 0), array.new<int>(NF, 0))
 var Agg aggT = f_newAgg()
 var Agg aggN = f_newAgg()
+var Agg aggR = f_newAgg()
 var array<float> cond = array.new<float>(NF, na)
 
 f_record(Agg a, array<float> c, bool won) =>
@@ -151,7 +224,8 @@ f_record(Agg a, array<float> c, bool won) =>
 
 // ===== Trades =====
 var int dir = 0
-var bool isFade = false
+// kind: 0 = trend, 1 = news fade, 2 = news reclaim
+var int kind = 0
 var float entry = na
 var float sl = na
 var float tp = na
@@ -169,13 +243,16 @@ var int nTrades = 0
 var int nWins = 0
 var float tR = 0.0
 var float nR = 0.0
+var int rTrades = 0
+var int rWins = 0
+var float rRsum = 0.0
 
 // manage the open trade (SL checked first)
 if dir != 0 and barstate.isconfirmed and bar_index > box.get_left(win)
     stopped = dir == 1 ? low <= sl : high >= sl
     bool done = stopped
     if not stopped
-        if isFade
+        if kind != 0
             if dir == 1 ? high >= tp : low <= tp
                 hits := 1
                 done := true
@@ -188,13 +265,13 @@ if dir != 0 and barstate.isconfirmed and bar_index > box.get_left(win)
     box.set_right(loss, bar_index)
     if done
         won = hits > 0
-        label.set_text(tag, label.get_text(tag) + (not won ? " SL" : isFade ? " TP" : " TP" + str.tostring(hits)))
+        label.set_text(tag, label.get_text(tag) + (not won ? " SL" : kind != 0 ? " TP" : " TP" + str.tostring(hits)))
         label.set_color(tag, won ? cLight : cDeep)
         label.set_textcolor(tag, won ? cDeep : color.white)
-        f_record(isFade ? aggN : aggT, cond, won)
+        f_record(kind == 2 ? aggR : kind == 1 ? aggN : aggT, cond, won)
         if won
             // profit box ends at the TP actually reached (ATR target when ATR-based TP is on)
-            reached = isFade ? tp : entry + dir * hits * step
+            reached = kind != 0 ? tp : entry + dir * hits * step
             box.set_top(win, math.max(entry, reached))
             box.set_bottom(win, math.min(entry, reached))
         else if winsOnly
@@ -204,7 +281,11 @@ if dir != 0 and barstate.isconfirmed and bar_index > box.get_left(win)
             boxes.pop()
             boxes.pop()
             tags.pop()
-        if isFade
+        if kind == 2
+            rTrades += 1
+            rRsum += won ? math.abs(tp - entry) / r : -1.0
+            rWins += won ? 1 : 0
+        else if kind == 1
             nTrades += 1
             nR += won ? math.abs(tp - entry) / r : -1.0
             nWins += won ? 1 : 0
@@ -220,23 +301,24 @@ if dir != 0 and barstate.isconfirmed and bar_index > box.get_left(win)
             tWins += won ? 1 : 0
         dir := 0
 
-// open a new trade (news fade first, then trend)
+// open a new trade (news reclaim first, then news fade, then trend)
 bool opened = false
-if dir == 0 and (fadeSig or trendBuy or trendSell) and not na(atr)
-    d = fadeSig ? fadeDir : trendBuy ? 1 : -1
-    fade = fadeSig
-    slPx = fade ? nTip - d * atr * fadeBuf : close - d * atr * atrMult
-    tpPx = swingTp and not na(swingAtr) ? close + d * swingAtr * swingMult : fade ? nOther : close + d * 3 * atr * atrMult
+if dir == 0 and (reclSig or fadeSig or trendBuy or trendSell) and not na(atr)
+    k = reclSig ? 2 : fadeSig ? 1 : 0
+    d = reclSig ? reclDir : fadeSig ? fadeDir : trendBuy ? 1 : -1
+    fade = k == 1
+    slPx = k == 2 ? reclSl : fade ? nTip - d * atr * fadeBuf : close - d * atr * atrMult
+    tpPx = swingTp and not na(swingAtr) ? close + d * swingAtr * swingMult : k == 2 ? rOther : fade ? nOther : close + d * 3 * atr * atrMult
     rngE = high - low
     riskA = math.abs(close - slPx) / atr
     rr = math.abs(tpPx - close) / math.max(math.abs(close - slPx), syminfo.mintick)
-    volR = fade ? nVolR : volume / volAvg
+    volR = k == 2 ? rNVol : fade ? nVolR : volume / volAvg
     bodyE = rngE > 0 ? math.abs(close - open) / rngE * 100 : 0
-    tipExt = fade ? math.abs(nTip - nClose) / atr : na
+    tipExt = k == 2 ? math.abs(rTip - rNClose) / atr : fade ? math.abs(nTip - nClose) / atr : na
     rsiD = d == 1 ? rsi : 100 - rsi
     pctBD = d == 1 ? pctB : 1 - pctB
     rngA = rngE / atr
-    setupOk = fade ? (fFadeRiskMin == 0 or riskA >= fFadeRiskMin) and (fFadeRngMin == 0 or rngA >= fFadeRngMin) : (fTrendRngMax == 0 or rngA <= fTrendRngMax) and (fTrendRsiMin == 0 or rsiD >= fTrendRsiMin) and (fTrendPctBMin == -1 or pctBD >= fTrendPctBMin)
+    setupOk = k == 2 ? true : fade ? (fFadeRiskMin == 0 or riskA >= fFadeRiskMin) and (fFadeRngMin == 0 or rngA >= fFadeRngMin) : (fTrendRngMax == 0 or rngA <= fTrendRngMax) and (fTrendRsiMin == 0 or rsiD >= fTrendRsiMin) and (fTrendPctBMin == -1 or pctBD >= fTrendPctBMin)
     passF = setupOk and (fVolMin == 0 or volR >= fVolMin) and (fBodyMin == 0 or bodyE >= fBodyMin) and rsiD >= fRsiMin and rsiD <= fRsiMax and pctBD >= fPctBMin and pctBD <= fPctBMax and (fRiskMin == 0 or riskA >= fRiskMin) and (fRiskMax == 0 or riskA <= fRiskMax) and (fRngMin == 0 or rngA >= fRngMin) and (fRngMax == 0 or rngA <= fRngMax) and (fRRMin == 0 or rr >= fRRMin) and (not fade or fSizeMin == 0 or nSize >= fSizeMin) and (not fade or fTipMax == 0 or tipExt <= fTipMax)
     if passF and (d == 1 ? slPx < close and tpPx > close : slPx > close and tpPx < close)
         opened := true
@@ -247,10 +329,10 @@ if dir == 0 and (fadeSig or trendBuy or trendSell) and not na(atr)
         cond.set(4, riskA)
         cond.set(5, rr)
         cond.set(6, rngE / atr)
-        cond.set(7, fade ? nSize : na)
+        cond.set(7, k == 2 ? rNSize : fade ? nSize : na)
         cond.set(8, tipExt)
         dir := d
-        isFade := fade
+        kind := k
         entry := close
         sl := slPx
         tp := tpPx
@@ -259,8 +341,8 @@ if dir == 0 and (fadeSig or trendBuy or trendSell) and not na(atr)
         hits := 0
         win := box.new(bar_index, math.max(close, tpPx), bar_index, math.min(close, tpPx), border_color=na, bgcolor=cWin)
         loss := box.new(bar_index, math.max(close, slPx), bar_index, math.min(close, slPx), border_color=na, bgcolor=cLoss)
-        tipTxt = (fade ? "News fade " : "Trend ") + (d == 1 ? "BUY" : "SELL") + "\nEntry " + str.tostring(close, format.mintick) + "\nSL " + str.tostring(slPx, format.mintick) + (fade ? "\nTP " + str.tostring(tpPx, format.mintick) + (swingTp ? " (" + str.tostring(swingMult) + " ATR)" : " (news other end)") : "\nTP1 " + str.tostring(close + d * step, format.mintick) + "\nTP2 " + str.tostring(close + d * 2 * step, format.mintick) + "\nTP3 " + str.tostring(tpPx, format.mintick) + (swingTp ? " (" + str.tostring(swingMult) + " ATR)" : ""))
-        tag := label.new(bar_index, close, (fade ? "N" : "") + (d == 1 ? "B" : "S"), color=cMid, textcolor=color.white, style=label.style_label_right, size=size.tiny, tooltip=tipTxt)
+        tipTxt = (k == 2 ? "News reclaim " : fade ? "News fade " : "Trend ") + (d == 1 ? "BUY" : "SELL") + "\nEntry " + str.tostring(close, format.mintick) + "\nSL " + str.tostring(slPx, format.mintick) + (k != 0 ? "\nTP " + str.tostring(tpPx, format.mintick) + (swingTp ? " (" + str.tostring(swingMult) + " ATR)" : " (news other end)") : "\nTP1 " + str.tostring(close + d * step, format.mintick) + "\nTP2 " + str.tostring(close + d * 2 * step, format.mintick) + "\nTP3 " + str.tostring(tpPx, format.mintick) + (swingTp ? " (" + str.tostring(swingMult) + " ATR)" : ""))
+        tag := label.new(bar_index, close, (k == 2 ? "R" : fade ? "N" : "") + (d == 1 ? "B" : "S"), color=cMid, textcolor=color.white, style=label.style_label_right, size=size.tiny, tooltip=tipTxt)
         boxes.push(win)
         boxes.push(loss)
         tags.push(tag)
@@ -273,7 +355,7 @@ alertcondition(opened and dir == 1, "Buy", "Sniper Mini: BUY")
 alertcondition(opened and dir == -1, "Sell", "Sniper Mini: SELL")
 
 // ===== Dashboard: win rate per setup =====
-var table dash = table.new(position.top_right, 6, 6, bgcolor=color.new(#0B1E3A, 10), border_width=1, border_color=color.new(cMid, 50))
+var table dash = table.new(position.top_right, 6, 7, bgcolor=color.new(#0B1E3A, 10), border_width=1, border_color=color.new(cMid, 50))
 f_row(int r0, string k, int n, int w, float rSum) =>
     table.cell(dash, 0, r0, k, text_color=cPale, text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, r0, str.tostring(n), text_color=color.white, text_size=size.small)
@@ -291,14 +373,15 @@ if barstate.islast
     table.cell(dash, 5, 0, "Net R", text_color=cLight, text_size=size.small)
     f_row(1, "Trend (TP1+)", tTrades, tWins, tR)
     f_row(2, "News fade", nTrades, nWins, nR)
-    f_row(3, "All", tTrades + nTrades, tWins + nWins, tR + nR)
-    table.cell(dash, 0, 4, (dir == 0 ? "Flat" : (isFade ? "In news fade " : "In trend ") + (dir == 1 ? "long" : "short")) + " | trend " + (fast > slow ? "up" : "down"), text_color=cPale, text_size=size.small, text_halign=text.align_left)
-    table.merge_cells(dash, 0, 4, 5, 4)
-    table.cell(dash, 0, 5, "R: loss = -1R. Trend scales out 1/3 at each TP, rest at SL.", text_color=cPale, text_size=size.tiny, text_halign=text.align_left)
+    f_row(3, "News reclaim", rTrades, rWins, rRsum)
+    f_row(4, "All", tTrades + nTrades + rTrades, tWins + nWins + rWins, tR + nR + rRsum)
+    table.cell(dash, 0, 5, (dir == 0 ? "Flat" : (kind == 2 ? "In news reclaim " : kind == 1 ? "In news fade " : "In trend ") + (dir == 1 ? "long" : "short")) + " | trend " + (fast > slow ? "up" : "down"), text_color=cPale, text_size=size.small, text_halign=text.align_left)
     table.merge_cells(dash, 0, 5, 5, 5)
+    table.cell(dash, 0, 6, "R: loss = -1R. Trend scales out 1/3 at each TP, rest at SL.", text_color=cPale, text_size=size.tiny, text_halign=text.align_left)
+    table.merge_cells(dash, 0, 6, 5, 6)
 
 // ===== Entry conditions table: winners range (avg) vs losers avg =====
-var table st = table.new(position.bottom_right, 5, NF + 2, bgcolor=color.new(#0B1E3A, 10), border_width=1, border_color=color.new(cMid, 50))
+var table st = table.new(position.bottom_right, 7, NF + 2, bgcolor=color.new(#0B1E3A, 10), border_width=1, border_color=color.new(cMid, 50))
 f_win(Agg a, int i) => a.wN.get(i) > 0 ? str.tostring(a.wMin.get(i), "#.##") + " - " + str.tostring(a.wMax.get(i), "#.##") + " (" + str.tostring(a.wSum.get(i) / a.wN.get(i), "#.##") + ")" : "-"
 f_loss(Agg a, int i) => a.lN.get(i) > 0 ? str.tostring(a.lSum.get(i) / a.lN.get(i), "#.##") : "-"
 f_sc(int c, int r0, string t, color col) =>
@@ -310,11 +393,15 @@ if showStats and barstate.islast
     f_sc(2, 0, "Trend loss avg", cLight)
     f_sc(3, 0, "Fade win range (avg)", cLight)
     f_sc(4, 0, "Fade loss avg", cLight)
+    f_sc(5, 0, "Reclaim win range (avg)", cLight)
+    f_sc(6, 0, "Reclaim loss avg", cLight)
     for i = 0 to NF - 1
         f_sc(0, i + 1, names.get(i), cPale)
         f_sc(1, i + 1, f_win(aggT, i), color.white)
         f_sc(2, i + 1, f_loss(aggT, i), cPale)
         f_sc(3, i + 1, f_win(aggN, i), color.white)
         f_sc(4, i + 1, f_loss(aggN, i), cPale)
+        f_sc(5, i + 1, f_win(aggR, i), color.white)
+        f_sc(6, i + 1, f_loss(aggR, i), cPale)
     f_sc(0, NF + 1, "Set the Dial-in Filters inside the winners' range, then re-check win rate and trade count.", cPale)
-    table.merge_cells(st, 0, NF + 1, 4, NF + 1)
+    table.merge_cells(st, 0, NF + 1, 6, NF + 1)
