@@ -28,7 +28,7 @@ newsBody = input.float(50, "News Min Body %", minval=0, maxval=100, group="News 
 needBB = input.bool(true, "News Must Close Outside Bollinger", group="News Fade", tooltip="86-93% of news candles in the research closed outside the bands.")
 fadeWait = input.int(3, "Fade Window (candles)", minval=1, maxval=20, group="News Fade", tooltip="The first candle closing against the news candle must come within this many candles.")
 fadeBuf = input.float(0.2, "SL Buffer beyond Tip (x ATR)", minval=0, step=0.05, group="News Fade")
-swingTp = input.bool(false, "ATR-based TP", group="Swing", tooltip="Final TP = entry +/- ATR x multiplier for both setups (replaces 3R for trend and the news other end for fades). Trend TP1 / TP2 sit at 1/3 and 2/3 of the way.")
+swingTp = input.bool(true, "ATR-based TP", group="Swing", tooltip="Final TP = entry +/- ATR x multiplier for both setups (replaces 3R for trend and the news other end for fades). Trend TP1 / TP2 sit at 1/3 and 2/3 of the way.")
 swingMult = input.float(3.0, "TP ATR Multiplier", minval=0.1, step=0.1, group="Swing")
 swingLen = input.int(14, "Swing ATR Length", minval=1, group="Swing")
 swingTF = input.timeframe("", "Swing ATR Timeframe (empty = chart)", group="Swing", tooltip="Eg. 60 or 240 to size swing targets from a higher timeframe ATR (closed candles only).")
@@ -46,8 +46,12 @@ fRiskMax = input.float(0, "Max Risk in ATR (0 = off)", minval=0, step=0.1, group
 fRngMin = input.float(0, "Min Entry Range in ATR (0 = off)", minval=0, step=0.1, group="Dial-in Filters (both setups)")
 fRngMax = input.float(0, "Max Entry Range in ATR (0 = off)", minval=0, step=0.1, group="Dial-in Filters (both setups)")
 fRRMin = input.float(0, "Min RR to Final TP (0 = off)", minval=0, step=0.1, group="Dial-in Filters (both setups)")
-fSizeMin = input.float(0, "Min News Size x Prior (0 = off)", minval=0, step=0.1, group="Dial-in Filters (news fade)")
-fTipMax = input.float(0, "Max Tip Extension in ATR (0 = off)", minval=0, step=0.1, group="Dial-in Filters (news fade)")
+// defaults tuned from the 15m XAUUSD results (winners vs losers); set to 0 to switch a filter off
+fSizeMin = input.float(3.0, "Min News Size x Prior (0 = off)", minval=0, step=0.1, group="Dial-in Filters (news fade)", tooltip="15m results: winners avg 3.86x, losers 2.73x.")
+fTipMax = input.float(1.0, "Max Tip Extension in ATR (0 = off)", minval=0, step=0.1, group="Dial-in Filters (news fade)", tooltip="15m results: winners avg 0.64 ATR, losers 0.87 ATR.")
+fFadeRiskMin = input.float(1.5, "Min Risk in ATR (0 = off)", minval=0, step=0.1, group="Dial-in Filters (news fade)", tooltip="15m results: winners avg 1.97 ATR, losers 1.37 ATR (tight stops got hit before the reclaim).")
+fFadeRngMin = input.float(1.5, "Min Entry Range in ATR (0 = off)", minval=0, step=0.1, group="Dial-in Filters (news fade)", tooltip="15m results: winners avg 1.95 ATR, losers 1.47 ATR (strong reversal candle).")
+fTrendRngMax = input.float(1.6, "Max Entry Range in ATR (0 = off)", minval=0, step=0.1, group="Dial-in Filters (trend)", tooltip="15m results: winners avg 1.48 ATR, losers 1.75 ATR (stretched entry candles failed more).")
 
 // ===== Blue palette =====
 cLight = #64B5F6
@@ -230,7 +234,8 @@ if dir == 0 and (fadeSig or trendBuy or trendSell) and not na(atr)
     rsiD = d == 1 ? rsi : 100 - rsi
     pctBD = d == 1 ? pctB : 1 - pctB
     rngA = rngE / atr
-    passF = (fVolMin == 0 or volR >= fVolMin) and (fBodyMin == 0 or bodyE >= fBodyMin) and rsiD >= fRsiMin and rsiD <= fRsiMax and pctBD >= fPctBMin and pctBD <= fPctBMax and (fRiskMin == 0 or riskA >= fRiskMin) and (fRiskMax == 0 or riskA <= fRiskMax) and (fRngMin == 0 or rngA >= fRngMin) and (fRngMax == 0 or rngA <= fRngMax) and (fRRMin == 0 or rr >= fRRMin) and (not fade or fSizeMin == 0 or nSize >= fSizeMin) and (not fade or fTipMax == 0 or tipExt <= fTipMax)
+    setupOk = fade ? (fFadeRiskMin == 0 or riskA >= fFadeRiskMin) and (fFadeRngMin == 0 or rngA >= fFadeRngMin) : (fTrendRngMax == 0 or rngA <= fTrendRngMax)
+    passF = setupOk and (fVolMin == 0 or volR >= fVolMin) and (fBodyMin == 0 or bodyE >= fBodyMin) and rsiD >= fRsiMin and rsiD <= fRsiMax and pctBD >= fPctBMin and pctBD <= fPctBMax and (fRiskMin == 0 or riskA >= fRiskMin) and (fRiskMax == 0 or riskA <= fRiskMax) and (fRngMin == 0 or rngA >= fRngMin) and (fRngMax == 0 or rngA <= fRngMax) and (fRRMin == 0 or rr >= fRRMin) and (not fade or fSizeMin == 0 or nSize >= fSizeMin) and (not fade or fTipMax == 0 or tipExt <= fTipMax)
     if passF and (d == 1 ? slPx < close and tpPx > close : slPx > close and tpPx < close)
         opened := true
         cond.set(0, volR)
