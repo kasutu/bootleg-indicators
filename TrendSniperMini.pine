@@ -33,6 +33,7 @@ swingMult = input.float(3.0, "TP ATR Multiplier", minval=0.1, step=0.1, group="S
 swingLen = input.int(14, "Swing ATR Length", minval=1, group="Swing")
 swingTF = input.timeframe("", "Swing ATR Timeframe (empty = chart)", group="Swing", tooltip="Eg. 60 or 240 to size swing targets from a higher timeframe ATR (closed candles only).")
 keep = input.int(50, "Trades Shown", minval=1, maxval=150, group="Display")
+winsOnly = input.bool(false, "Show Winning Trades Only", group="Display", tooltip="Losing trades are removed from the chart once they close (still counted in the dashboard and research table).")
 showStats = input.bool(true, "Show Entry Conditions Table", group="Display", tooltip="For every setup: range (min-max) and average of each entry condition among winners, and the average among losers. Use it to set the dial-in filters.")
 fVolMin = input.float(0, "Min Volume x Avg (0 = off)", minval=0, step=0.1, group="Dial-in Filters (both setups)")
 fBodyMin = input.float(0, "Min Entry Body % (0 = off)", minval=0, maxval=100, group="Dial-in Filters (both setups)")
@@ -180,6 +181,18 @@ if dir != 0 and barstate.isconfirmed and bar_index > box.get_left(win)
         label.set_color(tag, won ? cLight : cDeep)
         label.set_textcolor(tag, won ? cDeep : color.white)
         f_record(isFade ? aggN : aggT, cond, won)
+        if won
+            // profit box ends at the TP actually reached (ATR target when ATR-based TP is on)
+            reached = isFade ? tp : entry + dir * hits * step
+            box.set_top(win, math.max(entry, reached))
+            box.set_bottom(win, math.min(entry, reached))
+        else if winsOnly
+            box.delete(win)
+            box.delete(loss)
+            label.delete(tag)
+            boxes.pop()
+            boxes.pop()
+            tags.pop()
         if isFade
             nTrades += 1
             nWins += won ? 1 : 0
