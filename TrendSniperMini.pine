@@ -57,7 +57,8 @@ cLoss = color.new(#283593, 70)
 atr = ta.atr(14)
 f_swingAtr() => ta.atr(swingLen)[1]
 swingAtrHtf = request.security(syminfo.tickerid, swingTF == "" ? timeframe.period : swingTF, f_swingAtr(), lookahead=barmerge.lookahead_on)
-swingAtr = swingTF == "" ? ta.atr(swingLen) : swingAtrHtf
+swingAtrChart = ta.atr(swingLen)
+swingAtr = swingTF == "" ? swingAtrChart : swingAtrHtf
 fast = ta.ema(close, fastLen)
 slow = ta.ema(close, slowLen)
 plot(fast, "Fast EMA", color.new(cLight, 20))
