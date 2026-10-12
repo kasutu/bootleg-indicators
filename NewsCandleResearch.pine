@@ -1,0 +1,146 @@
+//@version=6
+// News Candle Research [kasutufx]
+// Research tool, no signals or trades. Finds every news candle on the 5m and 15m timeframes (and the chart TF)
+// and studies the candle that brings price back to the other end of the news candle.
+//
+// News candle : range >= X times the largest range of the previous N candles and body >= Y% of its range
+//               (optional time window). Pine has no economic calendar, so news is detected from price.
+// Other end   : bullish news candle -> its low (or open), bearish -> its high (or open).
+// Return candle: the first later candle that trades back to the other end (within Max Wait candles).
+// Studied     : how often / how fast price returns, the return candle's body composition (direction, body %,
+//               wicks, close beyond the end), and volume, RSI and Bollinger Bands at the news and return candles.
+indicator("News Candle Research [kasutufx]", shorttitle="News Research", overlay=true, max_labels_count=500)
+
+// ===== Inputs =====
+newsMult = input.float(2.0, "News Candle Size (x largest prior range)", minval=1, step=0.1, group="News Candle")
+newsLen = input.int(20, "Lookback (candles)", minval=2, group="News Candle")
+newsBody = input.float(50, "Min Body % of Range", minval=0, maxval=100, group="News Candle")
+useTime = input.bool(false, "Only Inside Time Window", group="News Candle")
+newsSess = input.session("0830-0900", "Time Window", group="News Candle")
+newsTz = input.string("America/New_York", "Window Timezone", group="News Candle")
+endMode = input.string("Wick", "Other End", options=["Wick", "Open"], group="Return", tooltip="Wick = low of a bullish news candle / high of a bearish one. Open = the news candle's open.")
+maxWait = input.int(50, "Max Wait (candles)", minval=1, maxval=500, group="Return", tooltip="Return candles later than this are counted as 'did not return'.")
+volLen = input.int(20, "Volume Average Length", minval=1, group="Research")
+rsiLen = input.int(14, "RSI Length", minval=2, group="Research")
+bbLen = input.int(20, "Bollinger Length", minval=2, group="Research")
+bbMult = input.float(2.0, "Bollinger StdDev", minval=0.1, step=0.1, group="Research")
+showMarks = input.bool(true, "Mark Chart-TF News / Return Candles", group="Display")
+
+// ===== Study (runs on the timeframe it is requested on) =====
+// Returns running sums; averages are computed for the dashboard.
+f_study() =>
+    rng = high - low
+    bodyTop = math.max(open, close)
+    bodyBot = math.min(open, close)
+    inTime = not useTime or not na(time(timeframe.period, newsSess + ":1234567", newsTz))
+    isNews = rng > 0 and rng >= newsMult * ta.highest(rng, newsLen)[1] and (bodyTop - bodyBot) >= rng * newsBody / 100 and inTime
+    volR = volume / ta.sma(volume, volLen)
+    rsi = ta.rsi(close, rsiLen)
+    basis = ta.sma(close, bbLen)
+    dev = bbMult * ta.stdev(close, bbLen)
+    up = basis + dev
+    dn = basis - dev
+    pctB = dev > 0 ? (close - dn) / (up - dn) : 0.5
+    // news candle stats
+    var int nCnt = 0
+    var float nVol = 0.0
+    var float nRsi = 0.0
+    var int nOut = 0
+    // return candle stats
+    var int rCnt = 0
+    var float rBars = 0.0
+    var int rCounter = 0
+    var float rBody = 0.0
+    var float rWickTo = 0.0
+    var float rWickAway = 0.0
+    var int rBeyond = 0
+    var float rVol = 0.0
+    var float rRsi = 0.0
+    var int rPierce = 0
+    // pending news candle
+    var int pDir = 0
+    var float pEnd = na
+    var int pBar = na
+    bool evRet = false
+    int age = 0
+    if pDir != 0 and bar_index > pBar
+        age := bar_index - pBar
+        if pDir == 1 ? low <= pEnd : high >= pEnd
+            evRet := true
+            rCnt += 1
+            rBars += age
+            rCounter += (pDir == 1 ? close < open : close > open) ? 1 : 0
+            rBody += rng > 0 ? (bodyTop - bodyBot) / rng * 100 : 0
+            // wick toward the end (the side that reached it) and the wick on the other side
+            rWickTo += rng > 0 ? (pDir == 1 ? bodyBot - low : high - bodyTop) / rng * 100 : 0
+            rWickAway += rng > 0 ? (pDir == 1 ? high - bodyTop : bodyBot - low) / rng * 100 : 0
+            rBeyond += (pDir == 1 ? close <= pEnd : close >= pEnd) ? 1 : 0
+            rVol += nz(volR)
+            rRsi += nz(rsi)
+            rPierce += (pDir == 1 ? low < dn : high > up) ? 1 : 0
+            pDir := 0
+        else if age >= maxWait
+            pDir := 0
+    bool evNews = false
+    if isNews
+        evNews := true
+        d = close > open ? 1 : -1
+        nCnt += 1
+        nVol += nz(volR)
+        nRsi += nz(rsi)
+        nOut += (d == 1 ? close > up : close < dn) ? 1 : 0
+        pDir := d
+        pEnd := endMode == "Wick" ? (d == 1 ? low : high) : open
+        pBar := bar_index
+    [nCnt, nVol, nRsi, nOut, rCnt, rBars, rCounter, rBody, rWickTo, rWickAway, rBeyond, rVol, rRsi, rPierce, evNews, evRet, age]
+
+[a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, aN, aR, aAge] = request.security(syminfo.tickerid, "5", f_study())
+[b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, bN, bR, bAge] = request.security(syminfo.tickerid, "15", f_study())
+[c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, cN, cR, cAge] = f_study()
+
+// ===== Chart marks (chart timeframe) =====
+chartVolR = volume / ta.sma(volume, volLen)
+chartRsi = ta.rsi(close, rsiLen)
+if showMarks and barstate.isconfirmed and cN
+    label.new(bar_index, close > open ? low : high, "N", color=color.new(color.yellow, 20), textcolor=color.black, style=close > open ? label.style_label_up : label.style_label_down, size=size.tiny, tooltip="News candle\nVolume " + str.tostring(chartVolR, "#.#") + "x avg\nRSI " + str.tostring(chartRsi, "#.#"))
+if showMarks and barstate.isconfirmed and cR
+    rng0 = high - low
+    bodyP = rng0 > 0 ? math.abs(close - open) / rng0 * 100 : 0
+    upW = rng0 > 0 ? (high - math.max(open, close)) / rng0 * 100 : 0
+    loW = rng0 > 0 ? (math.min(open, close) - low) / rng0 * 100 : 0
+    label.new(bar_index, close > open ? high : low, "R", color=color.new(color.aqua, 20), textcolor=color.black, style=close > open ? label.style_label_down : label.style_label_up, size=size.tiny, tooltip="Return candle (" + str.tostring(cAge) + " candles after news)\n" + (close > open ? "Bullish" : close < open ? "Bearish" : "Doji") + " | body " + str.tostring(bodyP, "#") + "%\nUpper wick " + str.tostring(upW, "#") + "% | lower wick " + str.tostring(loW, "#") + "%\nVolume " + str.tostring(chartVolR, "#.#") + "x avg | RSI " + str.tostring(chartRsi, "#.#"))
+
+// ===== Dashboard =====
+f_pct(float part, float whole) => whole > 0 ? str.tostring(part / whole * 100, "#") + "%" : "-"
+f_avg(float sum, float n, string fmt) => n > 0 ? str.tostring(sum / n, fmt) : "-"
+
+var table tbl = table.new(position.top_right, 4, 17, bgcolor=color.new(color.black, 15), border_width=1, border_color=color.gray)
+f_cell(int c, int r, string txt, color col) =>
+    table.cell(tbl, c, r, txt, text_color=col, text_size=size.small, text_halign=c == 0 ? text.align_left : text.align_right)
+f_col(int c, string head, float n0, float n1, float n2, float n3, float r0, float r1, float r2, float r3, float r4, float r5, float r6, float r7, float r8, float r9) =>
+    f_cell(c, 0, head, color.yellow)
+    f_cell(c, 1, str.tostring(n0), color.white)
+    f_cell(c, 2, f_avg(n1, n0, "#.#") + "x", color.white)
+    f_cell(c, 3, f_avg(n2, n0, "#"), color.white)
+    f_cell(c, 4, f_pct(n3, n0), color.white)
+    f_cell(c, 5, f_pct(r0, n0), color.aqua)
+    f_cell(c, 6, f_avg(r1, r0, "#.#"), color.white)
+    f_cell(c, 7, f_pct(r2, r0), color.white)
+    f_cell(c, 8, f_avg(r3, r0, "#") + "%", color.white)
+    f_cell(c, 9, f_avg(r4, r0, "#") + "%", color.white)
+    f_cell(c, 10, f_avg(r5, r0, "#") + "%", color.white)
+    f_cell(c, 11, f_pct(r6, r0), color.white)
+    f_cell(c, 12, f_avg(r7, r0, "#.#") + "x", color.white)
+    f_cell(c, 13, f_avg(r8, r0, "#"), color.white)
+    f_cell(c, 14, f_pct(r9, r0), color.white)
+
+if barstate.islast
+    rows = array.from("News candles", "News volume (x avg)", "News RSI (avg)", "News close outside BB", "Returned to other end", "Candles to return (avg)", "Return candle against news", "Return body % (avg)", "Wick toward end % (avg)", "Wick other side % (avg)", "Return closed beyond end", "Return volume (x avg)", "Return RSI (avg)", "Return wick outside BB")
+    f_cell(0, 0, "Metric", color.yellow)
+    for i = 0 to rows.size() - 1
+        f_cell(0, i + 1, rows.get(i), color.gray)
+    f_col(1, "5m", a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13)
+    f_col(2, "15m", b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13)
+    f_col(3, "Chart " + timeframe.period, c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13)
+    f_cell(0, 15, "Other end: " + endMode + " | max wait " + str.tostring(maxWait), color.gray)
+    f_cell(0, 16, "Counts cover the history loaded on each TF", color.gray)
