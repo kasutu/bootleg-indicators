@@ -1,6 +1,10 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// Includes the Moving Average Trend Sniper (MATS) calculation by ChartPrime (MPL 2.0), ported to Pine v6
+// with minor changes. Range Breakout is an independent implementation of range-detection ideas popularised
+// by QuantAlgo's Auto Range Detector (no code copied).
 //@version=6
 // Trend Sniper Mini [kasutufx]
-// Three setups, one trade at a time, every past execution kept on the chart. Blue palette (red-green safe).
+// Four setups, one trade at a time, every past execution kept on the chart. Blue palette (red-green safe).
 //
 // TREND     : fast EMA above / below slow EMA (+ HTF agrees), price closes back across the fast EMA,
 //             volume above average. SL = ATR x mult, targets 1R / 2R / 3R. Win = TP1 or better.
@@ -14,6 +18,12 @@
 //             (reclaim direction) as a triple close (3 closes in that direction) or a candle bigger than the
 //             average consolidation candle x Big Candle. SL beyond the box (tip side) + buffer. TP = other end
 //             of the news candle. A new tip restarts the consolidation.
+// TREND ENGINE: "EMA 50/200" (pullback cross above) or "MATS": entry when the 2-bar SMA of close flips
+//             across the MATS line (ChartPrime), with the same HTF / volume / dial-in filters.
+// RANGE BREAKOUT: a range is a window (Range Length) whose height is compressed vs its own history
+//             (percentile rank), rotates around its midline, tests both edges and has little drift. Entry on a
+//             close beyond the range + buffer, optionally only with the MATS trend. SL = range midpoint
+//             +/- buffer, TP = breakout edge + range height (measured move).
 // RESEARCH  : every entry records its conditions (volume, body, RSI, BB %B, risk, RR, range, news size, tip
 //             extension). The bottom table shows the winners' range and average vs the losers' average per setup;
 //             the Dial-in Filters restrict entries to the range you choose.
@@ -21,6 +31,21 @@ indicator("Trend Sniper Mini [kasutufx]", shorttitle="Sniper Mini", overlay=true
 
 // ===== Inputs =====
 useTrend = input.bool(true, "Trend Entries", group="Trend")
+trendEngine = input.string("EMA 50/200", "Trend Engine", options=["EMA 50/200", "MATS"], group="Trend", tooltip="EMA 50/200 = pullback cross of the fast EMA in an EMA trend. MATS = entry when price flips across the MATS line.")
+matsLen = input.int(30, "MATS Length", minval=2, group="MATS (ChartPrime)")
+showMats = input.bool(true, "Show MATS Line", group="MATS (ChartPrime)")
+useRange = input.bool(true, "Range Breakout Entries", group="Range Breakout")
+rgLen = input.int(20, "Range Length", minval=8, maxval=100, group="Range Breakout")
+rgComp = input.float(40, "Compression Percentile (max)", minval=5, maxval=95, step=5, group="Range Breakout", tooltip="Range height vs ATR, ranked against its own history. 40 = tighter than 60% of past windows.")
+rgCal = input.int(500, "Calibration Lookback", minval=100, maxval=2000, group="Range Breakout")
+rgRot = input.float(0.18, "Min Midline Crossings per Bar", minval=0.05, maxval=0.6, step=0.01, group="Range Breakout")
+rgTouch = input.int(2, "Min Touches per Edge", minval=1, maxval=10, group="Range Breakout")
+rgTol = input.float(0.10, "Touch Tolerance (ATR)", minval=0.02, maxval=1, step=0.02, group="Range Breakout")
+rgDrift = input.float(0.45, "Max Drift", minval=0.05, maxval=2, step=0.05, group="Range Breakout", tooltip="Regression slope over the window as a share of range height.")
+rgCont = input.float(0.70, "Min Closes Inside", minval=0.4, maxval=1, step=0.05, group="Range Breakout")
+rgBuf = input.float(0.15, "Breakout Buffer (ATR)", minval=0, maxval=2, step=0.05, group="Range Breakout")
+rgMaxAge = input.int(200, "Max Range Age (candles)", minval=10, maxval=2000, group="Range Breakout")
+rgWithMats = input.bool(true, "Only Break in MATS Direction", group="Range Breakout")
 fastLen = input.int(50, "Fast EMA", group="Trend")
 slowLen = input.int(200, "Slow EMA", group="Trend")
 htfTF = input.timeframe("15", "HTF Trend (empty = off)", group="Trend")
@@ -87,14 +112,123 @@ slow = ta.ema(close, slowLen)
 plot(fast, "Fast EMA", color.new(cLight, 20))
 plot(slow, "Slow EMA", color.new(cDeep, 0), 2)
 
+// ===== MATS (ChartPrime, MPL 2.0) =====
+f_cpEma(float source) =>
+    var float e = 0.0
+    var int count = 0
+    count := nz(count[1]) + 1
+    e := (1.0 - 2.0 / (count + 1.0)) * nz(e[1]) + 2.0 / (count + 1.0) * source
+    e
+f_atan2(float y, float x) =>
+    var float angle = 0.0
+    if x > 0
+        angle := math.atan(y / x)
+    else if x < 0 and y >= 0
+        angle := math.atan(y / x) + math.pi
+    else if x < 0 and y < 0
+        angle := math.atan(y / x) - math.pi
+    else if x == 0 and y > 0
+        angle := math.pi / 2
+    else if x == 0 and y < 0
+        angle := -math.pi / 2
+    angle
+f_tra() =>
+    a = f_cpEma(ta.tr)
+    slope = (close - close[10]) / (a * 10)
+    deg = f_atan2(slope, 1) * 180 / math.pi
+    ta.sma(deg > 0 ? high : low, 2)
+f_mats(float source, int length) =>
+    smooth = 0.0
+    hh = math.max(math.sign(ta.change(ta.highest(length))), 0)
+    ll = math.max(math.sign(ta.change(ta.lowest(length)) * -1), 0)
+    tc = math.pow(ta.sma(hh > 0 or ll > 0 ? 1.0 : 0.0, length), 2)
+    smooth := nz(smooth[1] + tc * (source - smooth[1]), source)
+    wp = length * 4 - 1
+    a = math.abs(nz(smooth[1]) - smooth)
+    maAtr = ta.ema(a, wp)
+    delta = ta.ema(maAtr, wp) * length * 0.4
+    result = 0.0
+    if smooth > nz(result[1])
+        result := smooth - delta < result[1] ? result[1] : smooth - delta
+    else
+        result := smooth + delta > result[1] ? result[1] : smooth + delta
+    result
+matsLine = f_mats(f_tra(), matsLen)
+matsUp = ta.sma(close, 2) > matsLine
+plot(showMats ? matsLine : na, "MATS", matsUp ? cLight : #5C6BC0, 2)
+
+// ===== Range detection (independent implementation) =====
+atrRg = ta.atr(200)
+rgTop = ta.highest(high, rgLen)
+rgBot = ta.lowest(low, rgLen)
+rgH = rgTop - rgBot
+rgCompVal = atrRg > 0 and rgH > 0 ? rgH / (atrRg * math.sqrt(rgLen)) : 99.0
+rgRank = ta.percentrank(rgCompVal, rgCal)
+rgSlope = ta.linreg(close, rgLen, 0) - ta.linreg(close, rgLen, 1)
+f_rangeShape(float top, float bot, int len, float tol) =>
+    mid = (top + bot) / 2
+    int cross = 0
+    int tTop = 0
+    int tBot = 0
+    int inside = 0
+    for i = 0 to len - 1
+        if (close[i] > mid) != (close[i + 1] > mid)
+            cross += 1
+        if high[i] >= top - tol
+            tTop += 1
+        if low[i] <= bot + tol
+            tBot += 1
+        if close[i] <= top and close[i] >= bot
+            inside += 1
+    [cross, tTop, tBot, inside]
+[rgCross, rgTT, rgTB, rgIn] = f_rangeShape(rgTop, rgBot, rgLen, rgTol * nz(atrRg))
+rgQualified = useRange and not na(rgRank) and atrRg > 0 and bar_index > rgCal and rgRank <= rgComp and rgCross >= math.max(3, math.round(rgRot * rgLen)) and rgTT >= rgTouch and rgTB >= rgTouch and rgH > 0 and math.abs(rgSlope) * rgLen / rgH <= rgDrift and rgIn * 1.0 / rgLen >= rgCont
+
+var bool gActive = false
+var float gTop = na
+var float gBot = na
+var int gLeft = na
+var box gBox = na
+bool rangeSig = false
+int rangeDir = 0
+float rangeSl = na
+float rangeTp = na
+if barstate.isconfirmed
+    if gActive
+        box.set_right(gBox, bar_index)
+        upBrk = close > gTop + rgBuf * atrRg
+        dnBrk = close < gBot - rgBuf * atrRg
+        if upBrk or dnBrk or bar_index - gLeft >= rgMaxAge
+            gActive := false
+            if upBrk or dnBrk
+                bd = upBrk ? 1 : -1
+                box.set_border_color(gBox, color.new(bd == 1 ? cLight : #5C6BC0, 20))
+                if not rgWithMats or (bd == 1 ? matsUp : not matsUp)
+                    rangeSig := true
+                    rangeDir := bd
+                    gMid = (gTop + gBot) / 2
+                    rangeSl := gMid - bd * rgBuf * atrRg
+                    rangeTp := bd == 1 ? gTop + (gTop - gBot) : gBot - (gTop - gBot)
+    else if rgQualified
+        gActive := true
+        gTop := rgTop
+        gBot := rgBot
+        gLeft := bar_index - rgLen + 1
+        gBox := box.new(gLeft, gTop, bar_index, gBot, border_color=color.new(cPale, 50), bgcolor=color.new(cPale, 92), border_style=line.style_dashed)
+
 // ===== Trend signal =====
 f_htf() => ta.ema(close, fastLen)[1] - ta.ema(close, slowLen)[1]
 htfRaw = request.security(syminfo.tickerid, htfTF == "" ? timeframe.period : htfTF, f_htf(), lookahead=barmerge.lookahead_on)
 htfDiff = htfTF == "" ? 0.0 : htfRaw
 volAvg = ta.sma(volume, 20)
 volOk = volMult == 0 or volume > volAvg * volMult
-trendBuy = useTrend and barstate.isconfirmed and fast > slow and htfDiff >= 0 and ta.crossover(close, fast) and volOk
-trendSell = useTrend and barstate.isconfirmed and fast < slow and htfDiff <= 0 and ta.crossunder(close, fast) and volOk
+useMatsEngine = trendEngine == "MATS"
+emaBuy = fast > slow and ta.crossover(close, fast)
+emaSell = fast < slow and ta.crossunder(close, fast)
+matsBuy = matsUp and not matsUp[1]
+matsSell = not matsUp and matsUp[1]
+trendBuy = useTrend and barstate.isconfirmed and (useMatsEngine ? matsBuy : emaBuy) and htfDiff >= 0 and volOk
+trendSell = useTrend and barstate.isconfirmed and (useMatsEngine ? matsSell : emaSell) and htfDiff <= 0 and volOk
 
 // ===== News fade signal =====
 rng = high - low
@@ -207,6 +341,7 @@ f_newAgg() => Agg.new(array.new<float>(NF, 0.0), array.new<float>(NF, na), array
 var Agg aggT = f_newAgg()
 var Agg aggN = f_newAgg()
 var Agg aggR = f_newAgg()
+var Agg aggG = f_newAgg()
 var array<float> cond = array.new<float>(NF, na)
 
 f_record(Agg a, array<float> c, bool won) =>
@@ -246,6 +381,9 @@ var float nR = 0.0
 var int rTrades = 0
 var int rWins = 0
 var float rRsum = 0.0
+var int gTrades = 0
+var int gWins = 0
+var float gRsum = 0.0
 
 // manage the open trade (SL checked first)
 if dir != 0 and barstate.isconfirmed and bar_index > box.get_left(win)
@@ -268,7 +406,7 @@ if dir != 0 and barstate.isconfirmed and bar_index > box.get_left(win)
         label.set_text(tag, label.get_text(tag) + (not won ? " SL" : kind != 0 ? " TP" : " TP" + str.tostring(hits)))
         label.set_color(tag, won ? cLight : cDeep)
         label.set_textcolor(tag, won ? cDeep : color.white)
-        f_record(kind == 2 ? aggR : kind == 1 ? aggN : aggT, cond, won)
+        f_record(kind == 3 ? aggG : kind == 2 ? aggR : kind == 1 ? aggN : aggT, cond, won)
         if won
             // profit box ends at the TP actually reached (ATR target when ATR-based TP is on)
             reached = kind != 0 ? tp : entry + dir * hits * step
@@ -281,7 +419,11 @@ if dir != 0 and barstate.isconfirmed and bar_index > box.get_left(win)
             boxes.pop()
             boxes.pop()
             tags.pop()
-        if kind == 2
+        if kind == 3
+            gTrades += 1
+            gRsum += won ? math.abs(tp - entry) / r : -1.0
+            gWins += won ? 1 : 0
+        else if kind == 2
             rTrades += 1
             rRsum += won ? math.abs(tp - entry) / r : -1.0
             rWins += won ? 1 : 0
@@ -303,12 +445,12 @@ if dir != 0 and barstate.isconfirmed and bar_index > box.get_left(win)
 
 // open a new trade (news reclaim first, then news fade, then trend)
 bool opened = false
-if dir == 0 and (reclSig or fadeSig or trendBuy or trendSell) and not na(atr)
-    k = reclSig ? 2 : fadeSig ? 1 : 0
-    d = reclSig ? reclDir : fadeSig ? fadeDir : trendBuy ? 1 : -1
+if dir == 0 and (reclSig or fadeSig or rangeSig or trendBuy or trendSell) and not na(atr)
+    k = reclSig ? 2 : fadeSig ? 1 : rangeSig ? 3 : 0
+    d = reclSig ? reclDir : fadeSig ? fadeDir : rangeSig ? rangeDir : trendBuy ? 1 : -1
     fade = k == 1
-    slPx = k == 2 ? reclSl : fade ? nTip - d * atr * fadeBuf : close - d * atr * atrMult
-    tpPx = swingTp and not na(swingAtr) ? close + d * swingAtr * swingMult : k == 2 ? rOther : fade ? nOther : close + d * 3 * atr * atrMult
+    slPx = k == 3 ? rangeSl : k == 2 ? reclSl : fade ? nTip - d * atr * fadeBuf : close - d * atr * atrMult
+    tpPx = swingTp and not na(swingAtr) ? close + d * swingAtr * swingMult : k == 3 ? rangeTp : k == 2 ? rOther : fade ? nOther : close + d * 3 * atr * atrMult
     rngE = high - low
     riskA = math.abs(close - slPx) / atr
     rr = math.abs(tpPx - close) / math.max(math.abs(close - slPx), syminfo.mintick)
@@ -318,7 +460,7 @@ if dir == 0 and (reclSig or fadeSig or trendBuy or trendSell) and not na(atr)
     rsiD = d == 1 ? rsi : 100 - rsi
     pctBD = d == 1 ? pctB : 1 - pctB
     rngA = rngE / atr
-    setupOk = k == 2 ? true : fade ? (fFadeRiskMin == 0 or riskA >= fFadeRiskMin) and (fFadeRngMin == 0 or rngA >= fFadeRngMin) : (fTrendRngMax == 0 or rngA <= fTrendRngMax) and (fTrendRsiMin == 0 or rsiD >= fTrendRsiMin) and (fTrendPctBMin == -1 or pctBD >= fTrendPctBMin)
+    setupOk = k >= 2 ? true : fade ? (fFadeRiskMin == 0 or riskA >= fFadeRiskMin) and (fFadeRngMin == 0 or rngA >= fFadeRngMin) : (fTrendRngMax == 0 or rngA <= fTrendRngMax) and (fTrendRsiMin == 0 or rsiD >= fTrendRsiMin) and (fTrendPctBMin == -1 or pctBD >= fTrendPctBMin)
     passF = setupOk and (fVolMin == 0 or volR >= fVolMin) and (fBodyMin == 0 or bodyE >= fBodyMin) and rsiD >= fRsiMin and rsiD <= fRsiMax and pctBD >= fPctBMin and pctBD <= fPctBMax and (fRiskMin == 0 or riskA >= fRiskMin) and (fRiskMax == 0 or riskA <= fRiskMax) and (fRngMin == 0 or rngA >= fRngMin) and (fRngMax == 0 or rngA <= fRngMax) and (fRRMin == 0 or rr >= fRRMin) and (not fade or fSizeMin == 0 or nSize >= fSizeMin) and (not fade or fTipMax == 0 or tipExt <= fTipMax)
     if passF and (d == 1 ? slPx < close and tpPx > close : slPx > close and tpPx < close)
         opened := true
@@ -341,8 +483,8 @@ if dir == 0 and (reclSig or fadeSig or trendBuy or trendSell) and not na(atr)
         hits := 0
         win := box.new(bar_index, math.max(close, tpPx), bar_index, math.min(close, tpPx), border_color=na, bgcolor=cWin)
         loss := box.new(bar_index, math.max(close, slPx), bar_index, math.min(close, slPx), border_color=na, bgcolor=cLoss)
-        tipTxt = (k == 2 ? "News reclaim " : fade ? "News fade " : "Trend ") + (d == 1 ? "BUY" : "SELL") + "\nEntry " + str.tostring(close, format.mintick) + "\nSL " + str.tostring(slPx, format.mintick) + (k != 0 ? "\nTP " + str.tostring(tpPx, format.mintick) + (swingTp ? " (" + str.tostring(swingMult) + " ATR)" : " (news other end)") : "\nTP1 " + str.tostring(close + d * step, format.mintick) + "\nTP2 " + str.tostring(close + d * 2 * step, format.mintick) + "\nTP3 " + str.tostring(tpPx, format.mintick) + (swingTp ? " (" + str.tostring(swingMult) + " ATR)" : ""))
-        tag := label.new(bar_index, close, (k == 2 ? "R" : fade ? "N" : "") + (d == 1 ? "B" : "S"), color=cMid, textcolor=color.white, style=label.style_label_right, size=size.tiny, tooltip=tipTxt)
+        tipTxt = (k == 3 ? "Range breakout " : k == 2 ? "News reclaim " : fade ? "News fade " : "Trend ") + (d == 1 ? "BUY" : "SELL") + "\nEntry " + str.tostring(close, format.mintick) + "\nSL " + str.tostring(slPx, format.mintick) + (k != 0 ? "\nTP " + str.tostring(tpPx, format.mintick) + (swingTp ? " (" + str.tostring(swingMult) + " ATR)" : " (news other end)") : "\nTP1 " + str.tostring(close + d * step, format.mintick) + "\nTP2 " + str.tostring(close + d * 2 * step, format.mintick) + "\nTP3 " + str.tostring(tpPx, format.mintick) + (swingTp ? " (" + str.tostring(swingMult) + " ATR)" : ""))
+        tag := label.new(bar_index, close, (k == 3 ? "X" : k == 2 ? "R" : fade ? "N" : "") + (d == 1 ? "B" : "S"), color=cMid, textcolor=color.white, style=label.style_label_right, size=size.tiny, tooltip=tipTxt)
         boxes.push(win)
         boxes.push(loss)
         tags.push(tag)
@@ -355,7 +497,7 @@ alertcondition(opened and dir == 1, "Buy", "Sniper Mini: BUY")
 alertcondition(opened and dir == -1, "Sell", "Sniper Mini: SELL")
 
 // ===== Dashboard: win rate per setup =====
-var table dash = table.new(position.top_right, 6, 7, bgcolor=color.new(#0B1E3A, 10), border_width=1, border_color=color.new(cMid, 50))
+var table dash = table.new(position.top_right, 6, 8, bgcolor=color.new(#0B1E3A, 10), border_width=1, border_color=color.new(cMid, 50))
 f_row(int r0, string k, int n, int w, float rSum) =>
     table.cell(dash, 0, r0, k, text_color=cPale, text_size=size.small, text_halign=text.align_left)
     table.cell(dash, 1, r0, str.tostring(n), text_color=color.white, text_size=size.small)
@@ -374,14 +516,15 @@ if barstate.islast
     f_row(1, "Trend (TP1+)", tTrades, tWins, tR)
     f_row(2, "News fade", nTrades, nWins, nR)
     f_row(3, "News reclaim", rTrades, rWins, rRsum)
-    f_row(4, "All", tTrades + nTrades + rTrades, tWins + nWins + rWins, tR + nR + rRsum)
-    table.cell(dash, 0, 5, (dir == 0 ? "Flat" : (kind == 2 ? "In news reclaim " : kind == 1 ? "In news fade " : "In trend ") + (dir == 1 ? "long" : "short")) + " | trend " + (fast > slow ? "up" : "down"), text_color=cPale, text_size=size.small, text_halign=text.align_left)
-    table.merge_cells(dash, 0, 5, 5, 5)
-    table.cell(dash, 0, 6, "R: loss = -1R. Trend scales out 1/3 at each TP, rest at SL.", text_color=cPale, text_size=size.tiny, text_halign=text.align_left)
+    f_row(4, "Range breakout", gTrades, gWins, gRsum)
+    f_row(5, "All", tTrades + nTrades + rTrades + gTrades, tWins + nWins + rWins + gWins, tR + nR + rRsum + gRsum)
+    table.cell(dash, 0, 6, (dir == 0 ? "Flat" : (kind == 3 ? "In range breakout " : kind == 2 ? "In news reclaim " : kind == 1 ? "In news fade " : "In trend ") + (dir == 1 ? "long" : "short")) + " | trend " + ((useMatsEngine ? matsUp : fast > slow) ? "up" : "down"), text_color=cPale, text_size=size.small, text_halign=text.align_left)
     table.merge_cells(dash, 0, 6, 5, 6)
+    table.cell(dash, 0, 7, "R: loss = -1R. Trend scales out 1/3 at each TP, rest at SL.", text_color=cPale, text_size=size.tiny, text_halign=text.align_left)
+    table.merge_cells(dash, 0, 7, 5, 7)
 
 // ===== Entry conditions table: winners range (avg) vs losers avg =====
-var table st = table.new(position.bottom_right, 7, NF + 2, bgcolor=color.new(#0B1E3A, 10), border_width=1, border_color=color.new(cMid, 50))
+var table st = table.new(position.bottom_right, 9, NF + 2, bgcolor=color.new(#0B1E3A, 10), border_width=1, border_color=color.new(cMid, 50))
 f_win(Agg a, int i) => a.wN.get(i) > 0 ? str.tostring(a.wMin.get(i), "#.##") + " - " + str.tostring(a.wMax.get(i), "#.##") + " (" + str.tostring(a.wSum.get(i) / a.wN.get(i), "#.##") + ")" : "-"
 f_loss(Agg a, int i) => a.lN.get(i) > 0 ? str.tostring(a.lSum.get(i) / a.lN.get(i), "#.##") : "-"
 f_sc(int c, int r0, string t, color col) =>
@@ -395,6 +538,8 @@ if showStats and barstate.islast
     f_sc(4, 0, "Fade loss avg", cLight)
     f_sc(5, 0, "Reclaim win range (avg)", cLight)
     f_sc(6, 0, "Reclaim loss avg", cLight)
+    f_sc(7, 0, "Range win range (avg)", cLight)
+    f_sc(8, 0, "Range loss avg", cLight)
     for i = 0 to NF - 1
         f_sc(0, i + 1, names.get(i), cPale)
         f_sc(1, i + 1, f_win(aggT, i), color.white)
@@ -403,5 +548,7 @@ if showStats and barstate.islast
         f_sc(4, i + 1, f_loss(aggN, i), cPale)
         f_sc(5, i + 1, f_win(aggR, i), color.white)
         f_sc(6, i + 1, f_loss(aggR, i), cPale)
+        f_sc(7, i + 1, f_win(aggG, i), color.white)
+        f_sc(8, i + 1, f_loss(aggG, i), cPale)
     f_sc(0, NF + 1, "Set the Dial-in Filters inside the winners' range, then re-check win rate and trade count.", cPale)
-    table.merge_cells(st, 0, NF + 1, 6, NF + 1)
+    table.merge_cells(st, 0, NF + 1, 8, NF + 1)
